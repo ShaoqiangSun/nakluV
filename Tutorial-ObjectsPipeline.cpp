@@ -53,10 +53,16 @@ void Tutorial::ObjectsPipeline::create(RTG &rtg, VkRenderPass render_pass, uint3
         VK( vkCreateDescriptorSetLayout(rtg.device, &create_info, nullptr, &set1_Transforms) );
     }
 
-    { //the set2_TEXTURE layout has a single descriptor for a sampler2D used in the fragment shader:
-        std::array< VkDescriptorSetLayoutBinding, 1 > bindings{
-			VkDescriptorSetLayoutBinding{
+    { //the set2_Material layout has descriptors for MaterialParams and sampler2Ds used in the fragment shader:
+        std::array< VkDescriptorSetLayoutBinding, 2 > bindings{
+            VkDescriptorSetLayoutBinding{
 				.binding = 0,
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
+			},
+			VkDescriptorSetLayoutBinding{
+				.binding = 1,
 				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 				.descriptorCount = 1,
 				.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
@@ -69,14 +75,14 @@ void Tutorial::ObjectsPipeline::create(RTG &rtg, VkRenderPass render_pass, uint3
 			.pBindings = bindings.data(),
 		};
 
-        VK( vkCreateDescriptorSetLayout(rtg.device, &create_info, nullptr, &set2_TEXTURE) );
+        VK( vkCreateDescriptorSetLayout(rtg.device, &create_info, nullptr, &set2_Material) );
     }
     
     { //create pipeline layout:
         std::array< VkDescriptorSetLayout, 3 > layouts{
             set0_World,
             set1_Transforms,
-            set2_TEXTURE,
+            set2_Material,
         };
 
         VkPipelineLayoutCreateInfo create_info{
@@ -205,9 +211,9 @@ void Tutorial::ObjectsPipeline::create(RTG &rtg, VkRenderPass render_pass, uint3
 }
 
 void Tutorial::ObjectsPipeline::destroy(RTG &rtg) {
-    if (set2_TEXTURE != VK_NULL_HANDLE) {
-		vkDestroyDescriptorSetLayout(rtg.device, set2_TEXTURE, nullptr);
-		set2_TEXTURE = VK_NULL_HANDLE;
+    if (set2_Material != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(rtg.device, set2_Material, nullptr);
+		set2_Material = VK_NULL_HANDLE;
 	}
 
     if (set1_Transforms != VK_NULL_HANDLE) {

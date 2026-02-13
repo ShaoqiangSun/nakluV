@@ -77,6 +77,10 @@ struct RTG {
 		//run without a window, read events from stdin:
 		bool headless = false;
 
+		//.s72 scene file to load:
+		std::string scene_file = "";
+		std::string camera_name = "";
+
 		//for configuration construction + management:
 		Configuration() = default;
 		void parse(int argc, char **argv); //parse command-line options; throws on error
