@@ -8,6 +8,8 @@
 #include "RTG.hpp"
 #include "S72.hpp"
 
+#include <fstream>
+
 struct Tutorial : RTG::Application {
 
 	Tutorial(RTG &);
@@ -21,14 +23,30 @@ struct Tutorial : RTG::Application {
 
 	};
 
+	struct CpuTimer {
+		using clock = std::chrono::steady_clock;
+		clock::time_point t0;
+
+		void start() { t0 = clock::now(); }
+
+		double ms() const {
+			auto t1 = clock::now();
+			return std::chrono::duration<double, std::milli>(t1 - t0).count();
+		}
+	};
+
 	void load_mesh_vertices(S72 const &s72, std::vector< PosNorTanTexVertex > &vertices_pool);
 	void append_bbox_lines_world(AABB const &local, glm::mat4 const &WORLD_FROM_LOCAL, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff);
 	void append_frustum_lines_world(glm::mat4 const &CLIP_FROM_WORLD, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff);
 	void traverse_node(S72::Node* node, glm::mat4 const& parent);
+	void update_transforms_node(S72::Node* node, glm::mat4 const& parent);
 	void build_scene_objects();
+	void update_scene_objects();
 	void update_object_instances_camera();
 	void build_material_texture_indices();
 	void load_all_textures();
+	void cache_rest_pose_and_duration();
+	void apply_drivers(float t);
 	
 
 	//kept for use in destructor:
@@ -127,7 +145,7 @@ struct Tutorial : RTG::Application {
 		
 	};
 
-	uint32_t white_texture_index;
+	uint32_t default_texture_index;
 
 	//pools from which per-workspace things are allocated:
 	VkCommandPool command_pool = VK_NULL_HANDLE;
@@ -167,13 +185,16 @@ struct Tutorial : RTG::Application {
 	};
 	ObjectVertices plane_vertices;
 	ObjectVertices torus_vertices;
-	//load .s72 scene mesh vertices
-	std::unordered_map<std::string, ObjectVertices> mesh_vertices;
 
-	std::unordered_map<std::string, AABB> mesh_aabb_local;
+	//load .s72 scene mesh vertices
+	std::unordered_map<std::string, uint32_t> mesh_id;
+	std::vector<ObjectVertices> mesh_vertices;
+	std::vector<AABB> mesh_aabb_local;
+	
 
 	std::unordered_map<S72::Material const*, uint32_t> material_id;
 	std::unordered_map<S72::Texture const*, uint32_t> texture_id;
+
 	std::vector<S72::Material const*> materials_list;
 	std::vector<S72::Texture const*> textures_list;
 	std::vector< Helpers::AllocatedBuffer > material_params;
@@ -206,14 +227,31 @@ struct Tutorial : RTG::Application {
 
 	float time = 0.0f;
 
+	bool anim_paused = false;
+	bool anim_loop = true;
+	float anim_time = 0.0f;
+	float anim_duration = 0.0f;
+
+	std::vector<S72::Node*> all_nodes;
+	std::vector<S72::vec3> rest_T;
+	std::vector<S72::quat> rest_R;
+	std::vector<S72::vec3> rest_S;
+
+
 	//for selecting between cameras:
 	enum class CameraMode {
 		Scene = 0,
 		Free = 1,
 	};
 
+	enum class CullingMode {
+		None,
+		Frustum,
+	};
+
 	CameraMode camera_mode = CameraMode::Free;
 	bool debug_camera_mode = false;
+	CullingMode culling_mode = CullingMode::None;
 
 	//used when camera_mode == CameraMode::Free:
 	struct OrbitCamera {
@@ -233,6 +271,7 @@ struct Tutorial : RTG::Application {
 
 	//computed from the current camera (as set by camera_mode) during update():
 	mat4 CLIP_FROM_WORLD;
+	mat4 CLIP_FROM_WORLD_FOR_CULLING;
 	std::vector<mat4> camera_view_matrices;
 	std::vector<mat4> camera_proj_matrices;
 	std::vector<float> camera_aspects;
@@ -248,12 +287,21 @@ struct Tutorial : RTG::Application {
 	struct ObjectInstance {
 		ObjectVertices vertices;
 		ObjectsPipeline::Transform transform;
+		uint32_t mesh = 0;
 		uint32_t material = 0;
 	};
 	std::vector< ObjectInstance > object_instances;
+	std::unordered_map<S72::Node*, uint32_t> node_to_instance;
+
+	VkQueryPool timestamp_query_pool = VK_NULL_HANDLE;
+	float timestamp_period = 0.0f;
 
 	//--------------------------------------------------------------------
 	//Rendering function, uses all the resources above to queue work to draw a frame:
 
 	virtual void render(RTG &, RTG::RenderParams const &) override;
+
+	std::ofstream perf_log;
+	uint64_t frame_id = 0;
+
 };

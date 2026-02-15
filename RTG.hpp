@@ -80,6 +80,10 @@ struct RTG {
 		//.s72 scene file to load:
 		std::string scene_file = "";
 		std::string camera_name = "";
+		std::string culling_mode = "";
+		std::string test_mode = "";
+		std::string cpu_test_culled_count = "";
+		std::string csv_file_name = "";
 
 		//for configuration construction + management:
 		Configuration() = default;

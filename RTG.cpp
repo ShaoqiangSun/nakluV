@@ -55,7 +55,23 @@ void RTG::Configuration::parse(int argc, char **argv) {
 			if (argi + 1 >= argc) throw std::runtime_error("--camera requires a parameter (a camera name).");
 			argi += 1;
 			camera_name = argv[argi];
-		} 
+		} else if (arg == "--culling") {
+			if (argi + 1 >= argc) throw std::runtime_error("--culling requires a parameter (a mode name).");
+			argi += 1;
+			culling_mode = argv[argi];
+		} else if (arg == "--test") {
+			if (argi + 1 >= argc) throw std::runtime_error("--test requires a parameter (a mode name).");
+			argi += 1;
+			test_mode = argv[argi];
+		} else if (arg == "--culled-count") {
+			if (argi + 1 >= argc) throw std::runtime_error("--culled-count requires a parameter (a number).");
+			argi += 1;
+			cpu_test_culled_count = argv[argi];
+		} else if (arg == "--csv-file-name") {
+			if (argi + 1 >= argc) throw std::runtime_error("--csv-file-name requires a parameter (a file name).");
+			argi += 1;
+			csv_file_name = argv[argi];
+		}
 		
 		else {
 			throw std::runtime_error("Unrecognized argument '" + arg + "'.");

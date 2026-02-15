@@ -13,6 +13,56 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+static inline bool aabb_outside_plane(Tutorial::AABB const &box, glm::vec4 const &plane_local) {
+	glm::vec3 n(plane_local.x, plane_local.y, plane_local.z);
+
+	glm::vec3 v;
+    v.x = (n.x >= 0.0f) ? box.max.x : box.min.x;
+    v.y = (n.y >= 0.0f) ? box.max.y : box.min.y;
+    v.z = (n.z >= 0.0f) ? box.max.z : box.min.z;
+
+	float dist = plane_local.x * v.x + plane_local.y * v.y + plane_local.z * v.z + plane_local.w;
+    return dist < 0.0f;
+}
+
+
+static inline bool aabb_intersects_frustum_local(Tutorial::AABB const &box_local, glm::mat4 const& CLIP_FROM_LOCAL) {
+	//Vulkan clip constraints (x,y in [-w,w], z in [0,w]):
+    //left:   x + w >= 0
+    //right: -x + w >= 0
+    //bottom: y + w >= 0
+    //top:   -y + w >= 0
+    //near:  z >= 0
+    //far:  -z + w >= 0
+	const glm::vec4 planes_clip[6] = {
+        glm::vec4( 1,  0,  0, 1), //left
+        glm::vec4(-1,  0,  0, 1), //right
+        glm::vec4( 0,  1,  0, 1), //bottom
+        glm::vec4( 0, -1,  0, 1), //top
+        glm::vec4( 0,  0,  1, 0), //near
+        glm::vec4( 0,  0, -1, 1), //far
+    };
+
+	glm::mat4 CLIP_FROM_LOCAL_T = glm::transpose(CLIP_FROM_LOCAL);
+
+	for (int i = 0; i < 6; ++i) {
+        glm::vec4 plane_local = CLIP_FROM_LOCAL_T * planes_clip[i];
+        if (aabb_outside_plane(box_local, plane_local)) return false;
+    }
+    return true;
+}
+
+static inline float clamp01(float x) {
+	return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+}
+
+static inline S72::vec3 read_vec3(std::vector<float> const &v, size_t k) {
+	return S72::vec3(v[3*k+0], v[3*k+1], v[3*k+2]);
+}
+
+static inline S72::quat read_quat_wxyz(std::vector<float> const &v, size_t k) {
+	return S72::quat(v[4*k+3], v[4*k+0], v[4*k+1], v[4*k+2]);
+}
 
 //Reference from https://github.com/15-472/s72-loader print_scene.cpp
 void print_info(S72 &s72){
@@ -132,8 +182,6 @@ static void read_bytes(std::ifstream &f, uint64_t off, void *dst, size_t n) {
 
 void Tutorial::load_mesh_vertices(S72 const &s72, std::vector< PosNorTanTexVertex > &vertices_pool) {
 	for (auto const& [name, mesh] : s72.meshes) {
-		std::cout << "Material: " << mesh.material->name << std::endl;
-
 		auto const &position = mesh.attributes.at("POSITION");
 		auto const &normal = mesh.attributes.at("NORMAL");
 		auto const &tangent = mesh.attributes.at("TANGENT");
@@ -142,7 +190,6 @@ void Tutorial::load_mesh_vertices(S72 const &s72, std::vector< PosNorTanTexVerte
 		ObjectVertices range;
 		range.first = uint32_t(vertices_pool.size());
 		range.count = mesh.count;
-		mesh_vertices.emplace(name, range);
 
 		vertices_pool.resize(vertices_pool.size() + mesh.count);
 
@@ -168,7 +215,10 @@ void Tutorial::load_mesh_vertices(S72 const &s72, std::vector< PosNorTanTexVerte
             aabb.max = glm::max(aabb.max, p);
 		}
 
-		mesh_aabb_local[name] = aabb;
+		uint32_t idx = (uint32_t)mesh_aabb_local.size();
+		mesh_id.emplace(name, idx);
+		mesh_vertices.push_back(range);
+		mesh_aabb_local.push_back(aabb);
 		
 	}
 }
@@ -296,11 +346,13 @@ void Tutorial::traverse_node(S72::Node* node, glm::mat4 const& parent) {
 	mat4 world_matrix_normal = to_mat4(world_normal4);
 
 	if (node->mesh != nullptr) {
-		ObjectVertices vertices = mesh_vertices[node->mesh->name];
-
-		AABB local = mesh_aabb_local.at(node->mesh->name);
+		uint32_t mesh_idx = mesh_id.at(node->mesh->name);
+		ObjectVertices vertices = mesh_vertices[mesh_idx];
+		AABB local = mesh_aabb_local[mesh_idx];
 
 		append_bbox_lines_world(local, world_glm, 255, 0, 0, 255); // red
+
+		uint32_t inst_idx = uint32_t(object_instances.size());
 
 		object_instances.emplace_back(ObjectInstance{
 			.vertices = vertices,
@@ -309,8 +361,11 @@ void Tutorial::traverse_node(S72::Node* node, glm::mat4 const& parent) {
 				.WORLD_FROM_LOCAL = world_matrix,
 				.WORLD_FROM_LOCAL_NORMAL = world_matrix_normal,
 			},
-			.material = material_id.at(node->mesh->material),
+			.mesh = mesh_idx,
+			.material = node->mesh->material != nullptr ? material_id.at(node->mesh->material) : 0,
 		});
+
+		node_to_instance[node] = inst_idx;
 	}
 
 	if (node->light != nullptr) {
@@ -371,6 +426,50 @@ void Tutorial::traverse_node(S72::Node* node, glm::mat4 const& parent) {
 
 }
 
+void Tutorial::update_transforms_node(S72::Node* node, glm::mat4 const& parent) {
+	glm::mat4 local =
+		glm::translate(glm::mat4(1.0f), node->translation) *
+		glm::mat4_cast(node->rotation) *
+		glm::scale(glm::mat4(1.0f), node->scale);
+
+	glm::mat4 world_glm = parent * local; 
+	glm::mat3 world_normal3 = glm::transpose(glm::inverse(glm::mat3(world_glm)));
+	glm::mat4 world_normal4(1.0f);
+	world_normal4[0] = glm::vec4(world_normal3[0], 0.0f);
+	world_normal4[1] = glm::vec4(world_normal3[1], 0.0f);
+	world_normal4[2] = glm::vec4(world_normal3[2], 0.0f);
+
+	mat4 world_matrix = to_mat4(world_glm);
+	mat4 world_matrix_normal = to_mat4(world_normal4);
+
+	if (node->mesh != nullptr) {
+		uint32_t mesh_idx = mesh_id.at(node->mesh->name);
+		AABB local = mesh_aabb_local[mesh_idx];
+
+		append_bbox_lines_world(local, world_glm, 255, 0, 0, 255); // red
+
+		uint32_t inst_idx = node_to_instance.at(node);
+		//object_instances[inst_idx].CLIP_FROM_LOCAL = CLIP_FROM_WORLD * world_matrix;
+		object_instances[inst_idx].transform.WORLD_FROM_LOCAL = world_matrix;
+		object_instances[inst_idx].transform.WORLD_FROM_LOCAL_NORMAL = world_matrix_normal;
+	}
+
+	if (node->camera != nullptr) {
+		auto const& cam = *node->camera;
+
+		mat4 view = to_mat4(glm::inverse(world_glm));
+
+		uint32_t camera_idx = camera_indices[cam.name];
+
+		camera_view_matrices[camera_idx] = view;
+	}
+
+	for (S72::Node* child : node->children) {
+		update_transforms_node(child, world_glm);
+	}
+
+}
+
 void Tutorial::build_scene_objects() {
 	object_instances.clear();
 
@@ -380,18 +479,16 @@ void Tutorial::build_scene_objects() {
 		traverse_node(root, parent);
 	}
 
-	auto it = camera_indices.find(rtg.configuration.camera_name);
-	if (it != camera_indices.end()) {
-		current_camera_index = it->second;
-	}
-	
-	lines_vertices.clear();
-	for (auto & v : bbox_lines_vertices) {
-		lines_vertices.push_back(v);
-	}
+}
 
-	debug_camera.radius = 20.0f;
-	debug_camera.far = 10000.0f;
+void Tutorial::update_scene_objects() {
+	bbox_lines_vertices.clear();
+
+	glm::mat4 parent(1.0f);
+
+	for (S72::Node* root: s72.scene.roots) {
+		update_transforms_node(root, parent);
+	}
 }
 
 void Tutorial::update_object_instances_camera() {
@@ -426,12 +523,27 @@ void Tutorial::build_material_texture_indices() {
 
 	material_id.clear();
 	for (uint32_t i = 0; i < (uint32_t)materials_list.size(); ++i) {
-		material_id[materials_list[i]] = i;
+		//default material has index 0
+		material_id[materials_list[i]] = i + 1;
 	}
 	texture_id.clear();
 	for (uint32_t i = 0; i < (uint32_t)textures_list.size(); ++i) {
-		texture_id[textures_list[i]] = i;
+		//default texture has index 0
+		texture_id[textures_list[i]] = i + 1;
 	}
+
+	//default material has index 0
+	material_params.push_back(rtg.helpers.create_buffer(
+			sizeof(ObjectsPipeline::Material), 
+			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			Helpers::Mapped
+	));
+
+	S72::color c{0.8f, 0.8f, 0.8f};
+	std::memcpy(material_params[0].allocation.data(), &c, sizeof(c));
+
+	material_tex_info.emplace_back(MaterialTextureInfo{0, 0});
 
 	for (uint32_t i = 0; i < (uint32_t)materials_list.size(); ++i) {
 		S72::Material const* mat = materials_list[i];
@@ -449,8 +561,8 @@ void Tutorial::build_material_texture_indices() {
 			auto const& lam = std::get<S72::Material::Lambertian>(mat->brdf);
 			if (std::holds_alternative<S72::color>(lam.albedo)) {
 				auto const& c = std::get<S72::color>(lam.albedo);
-				
-				std::memcpy(material_params[i].allocation.data(), &c, sizeof(c));
+				//default material has index 0
+				std::memcpy(material_params[i + 1].allocation.data(), &c, sizeof(c));
 			} 
 			else {
 				auto const* tex = std::get<S72::Texture*>(lam.albedo);
@@ -458,7 +570,8 @@ void Tutorial::build_material_texture_indices() {
 				info.has_albedo_tex = 1;
 
 				S72::color c{1.0f, 1.0f, 1.0f};
-				std::memcpy(material_params[i].allocation.data(), &c, sizeof(c));
+				//default material has index 0
+				std::memcpy(material_params[i + 1].allocation.data(), &c, sizeof(c));
 			}
 		}
 
@@ -466,6 +579,7 @@ void Tutorial::build_material_texture_indices() {
 
 		
 	}
+
 }
 
 void Tutorial::load_all_textures() {
@@ -504,10 +618,169 @@ void Tutorial::load_all_textures() {
     }
 }
 
+void Tutorial::cache_rest_pose_and_duration() {
+	all_nodes.clear();
+	rest_T.clear();
+	rest_R.clear();
+	rest_S.clear();
+	
+	all_nodes.reserve(s72.nodes.size());
+	rest_T.reserve(s72.nodes.size());
+	rest_R.reserve(s72.nodes.size());
+	rest_S.reserve(s72.nodes.size());
+
+	for (auto &pair : s72.nodes) {
+		S72::Node *n = &pair.second;
+		all_nodes.push_back(n);
+		rest_T.push_back(n->translation);
+		rest_R.push_back(n->rotation);
+		rest_S.push_back(n->scale);
+	}
+
+	anim_duration = 0.0f;
+	for (auto const &d : s72.drivers) {
+		if (!d.times.empty()) anim_duration = std::max(anim_duration, d.times.back());
+	}
+}
+
+void Tutorial::apply_drivers(float t) {
+	//reset to rest pose:
+	for (size_t i = 0; i < all_nodes.size(); ++i) {
+		all_nodes[i]->translation = rest_T[i];
+		all_nodes[i]->rotation    = rest_R[i];
+		all_nodes[i]->scale       = rest_S[i];
+	}
+
+	for (auto const &d : s72.drivers) {
+		auto const &times = d.times;
+		if (times.empty()) continue;
+
+		if (t <= times.front()) {
+			size_t k = 0;
+			if (d.channel == S72::Driver::Channel::translation) d.node.translation = read_vec3(d.values, k);
+			else if (d.channel == S72::Driver::Channel::scale) d.node.scale = read_vec3(d.values, k);
+			else if (d.channel == S72::Driver::Channel::rotation) d.node.rotation = glm::normalize(read_quat_wxyz(d.values, k));
+			continue;
+		}
+
+		if (t >= times.back()) {
+			size_t k = times.size() - 1;
+			if (d.channel == S72::Driver::Channel::translation) d.node.translation = read_vec3(d.values, k);
+			else if (d.channel == S72::Driver::Channel::scale) d.node.scale = read_vec3(d.values, k);
+			else if (d.channel == S72::Driver::Channel::rotation) d.node.rotation = glm::normalize(read_quat_wxyz(d.values, k));
+			continue;
+		}
+
+		auto it = std::upper_bound(times.begin(), times.end(), t);
+		size_t i = size_t(it - times.begin()) - 1;
+		size_t j = i + 1;
+
+		float t0 = times[i], t1 = times[j];
+		float u = (t1 > t0) ? (t - t0) / (t1 - t0) : 0.0f;
+		u = clamp01(u);
+
+		if (d.interpolation == S72::Driver::Interpolation::STEP) u = 0.0f;
+
+		if (d.channel == S72::Driver::Channel::translation) {
+			S72::vec3 a = read_vec3(d.values, i);
+			S72::vec3 b = read_vec3(d.values, j);
+			d.node.translation = (1.0f - u) * a + u * b;
+		} 
+		else if (d.channel == S72::Driver::Channel::scale) {
+			S72::vec3 a = read_vec3(d.values, i);
+			S72::vec3 b = read_vec3(d.values, j);
+			d.node.scale = (1.0f - u) * a + u * b;
+		} 
+		else if (d.channel == S72::Driver::Channel::rotation) {
+			S72::quat qa = glm::normalize(read_quat_wxyz(d.values, i));
+			S72::quat qb = glm::normalize(read_quat_wxyz(d.values, j));
+
+			if (d.interpolation == S72::Driver::Interpolation::SLERP) {
+				d.node.rotation = glm::slerp(qa, qb, u);
+			} else {
+				d.node.rotation = glm::normalize(glm::mix(qa, qb, u));
+			}
+		}
+		
+	}
+
+}
+
+static S72 build_cpu_bottleneck_scene(std::string const& base_s72_file, std::string const& mesh_name, uint32_t N_culled) {
+	S72 s72 = S72::load(base_s72_file);
+
+	S72::Mesh* shared_mesh = &s72.meshes.at(mesh_name);
+
+    auto make_culled_name = [](uint32_t i){
+        return "C_" + std::to_string(i);
+    };
+
+	for (uint32_t i = 0; i < N_culled; ++i) {
+        S72::Node n;
+        n.name = make_culled_name(i);
+        n.mesh = shared_mesh;
+
+		n.translation = S72::vec3(+10.0f + float(i) * 0.1f, 0.0f, -8.0f);
+
+        n.rotation = S72::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        n.scale = S72::vec3(1.0f);
+
+        auto [it, ok] = s72.nodes.emplace(n.name, std::move(n));
+        (void)ok;
+
+        s72.scene.roots.push_back(&it->second);
+    }
+
+	return s72;
+}
+
+
+
+
 Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 	//load .s72 scene:
 	try {
-		if (!rtg.configuration.scene_file.empty()) {
+		if (!rtg.configuration.test_mode.empty()) {
+			
+			if (rtg.configuration.test_mode == "cpu") {
+				uint32_t N_culled = std::stoul(rtg.configuration.cpu_test_culled_count);
+				s72 = build_cpu_bottleneck_scene("scenes/cpu-bottleneck.s72", "Rounded-Cube" ,N_culled);
+				
+			}
+			
+			else if (rtg.configuration.test_mode == "gpu") {
+				if (!rtg.configuration.scene_file.empty()) s72 = S72::load(rtg.configuration.scene_file);
+			}
+			
+			if (!rtg.configuration.camera_name.empty()) {
+				if (s72.cameras.count(rtg.configuration.camera_name) == 0) {
+					throw std::runtime_error(
+						"Camera '" + rtg.configuration.camera_name + "' not found in scene."
+					);
+				}
+				camera_mode = CameraMode::Scene;
+				
+        	}
+
+			if (!rtg.configuration.culling_mode.empty()) {
+				if (rtg.configuration.culling_mode == "none") culling_mode = CullingMode::None;
+				else if (rtg.configuration.culling_mode == "frustum") culling_mode = CullingMode::Frustum;
+				else throw std::runtime_error(
+					"Culling mode '" + rtg.configuration.culling_mode + "' is incorrect."
+				);
+			}
+
+			std::string csv_file_name = rtg.configuration.csv_file_name.empty() ? "perf.csv" : rtg.configuration.csv_file_name;
+
+			perf_log.open(csv_file_name);
+
+			if (!perf_log) {
+				throw std::runtime_error("Failed to open perf.csv");
+			}
+
+			perf_log << "frame,instances,visible,cpu_cull_ms,cpu_frame_ms,cpu_wait_gpu_ms,gpu_draw_ms\n";
+		}
+		else if (!rtg.configuration.scene_file.empty()) {
 			s72 = S72::load(rtg.configuration.scene_file);
 			print_info(s72);
 			print_scene_graph(s72);
@@ -515,13 +788,22 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 			print_data_file(s72);
 
 			if (!rtg.configuration.camera_name.empty()) {
-            if (s72.cameras.count(rtg.configuration.camera_name) == 0) {
-                throw std::runtime_error(
-                    "Camera '" + rtg.configuration.camera_name + "' not found in scene."
-                );
-            }
-            camera_mode = CameraMode::Scene;
-        }
+				if (s72.cameras.count(rtg.configuration.camera_name) == 0) {
+					throw std::runtime_error(
+						"Camera '" + rtg.configuration.camera_name + "' not found in scene."
+					);
+				}
+				camera_mode = CameraMode::Scene;
+				
+        	}
+
+			if (!rtg.configuration.culling_mode.empty()) {
+				if (rtg.configuration.culling_mode == "none") culling_mode = CullingMode::None;
+				else if (rtg.configuration.culling_mode == "frustum") culling_mode = CullingMode::Frustum;
+				else throw std::runtime_error(
+					"Culling mode '" + rtg.configuration.culling_mode + "' is incorrect."
+				);
+			}
 
 		}
 	} catch (std::exception &e) {
@@ -529,6 +811,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 
 		std::exit(EXIT_FAILURE);
 	}
+
 
 	//select a depth format:
 	//  (at least one of these two must be supported, according to the spec; but neither are required)
@@ -623,9 +906,23 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 		VK( vkCreateCommandPool(rtg.device, &create_info, nullptr, &command_pool) );
 	}
 
+	{//query
+		VkPhysicalDeviceProperties props{};
+		vkGetPhysicalDeviceProperties(rtg.physical_device, &props);
+		timestamp_period = props.limits.timestampPeriod;
+
+		VkQueryPoolCreateInfo qpci{
+			.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+			.queryType = VK_QUERY_TYPE_TIMESTAMP,
+			.queryCount = 2,
+		};
+		VK( vkCreateQueryPool(rtg.device, &qpci, nullptr, &timestamp_query_pool) );
+	}
+
 	background_pipeline.create(rtg, render_pass, 0);
 	lines_pipeline.create(rtg, render_pass, 0);
 	objects_pipeline.create(rtg, render_pass, 0);
+	
 
 	{ //create descriptor pool:
 		uint32_t per_workspace = uint32_t(rtg.workspaces.size());  //for easier-to-read counting
@@ -771,8 +1068,6 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 		}
 
 	}
-
-	build_material_texture_indices();
 
 	{ //create object vertices
 		// std::vector< PosNorTexVertex > vertices;
@@ -946,9 +1241,11 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 		rtg.helpers.transfer_to_buffer(vertices.data(), bytes, object_vertices);
 	}
 
+	build_material_texture_indices();
 	build_scene_objects();
+	cache_rest_pose_and_duration();
 
-	{
+	{ //initialization
 		auto it = camera_indices.find(rtg.configuration.camera_name);
 		if (it != camera_indices.end()) {
 			current_camera_index = it->second;
@@ -1027,9 +1324,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 		// 	rtg.helpers.transfer_to_image(data.data(), sizeof(data[0]) * data.size(), textures.back());
 		// }
 
-		load_all_textures();
-
-		{ //the last texture will be a white texture.
+		{ //the default first texture will be a white texture.
 			//actually make the texture:
 			uint32_t size = 128;
 			std::vector< uint32_t > data;
@@ -1055,8 +1350,10 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 			rtg.helpers.transfer_to_image(data.data(), sizeof(data[0]) * data.size(), textures.back());
 
 			//
-			white_texture_index = uint32_t(textures.size() - 1);
+			default_texture_index = 0;
 		}
+
+		load_all_textures();
 		
 	}
 
@@ -1111,7 +1408,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 	}
 		
 	{ // create the material descriptor pool
-		uint32_t per_material = uint32_t(s72.materials.size()); //for easier-to-read counting
+		uint32_t per_material = uint32_t(material_params.size()); //for easier-to-read counting
 
 		std::array< VkDescriptorPoolSize, 2> pool_sizes{
 			VkDescriptorPoolSize{
@@ -1144,7 +1441,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 			.descriptorSetCount = 1,
 			.pSetLayouts = &objects_pipeline.set2_Material,
 		};
-		material_descriptors.assign(s72.materials.size(), VK_NULL_HANDLE);
+		material_descriptors.assign(material_params.size(), VK_NULL_HANDLE);
 		for (VkDescriptorSet &descriptor_set : material_descriptors) {
 			VK( vkAllocateDescriptorSets(rtg.device, &alloc_info, &descriptor_set) );
 		}
@@ -1172,7 +1469,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 					.pBufferInfo = &material_params_infos[i],
 			});
 
-			uint32_t tex_index = material_tex_info[i].has_albedo_tex ? material_tex_info[i].albedo_tex_index : white_texture_index;
+			uint32_t tex_index = material_tex_info[i].has_albedo_tex ? material_tex_info[i].albedo_tex_index : default_texture_index;
 
 			
 
@@ -1321,6 +1618,11 @@ Tutorial::~Tutorial() {
 		vkDestroyRenderPass(rtg.device, render_pass, nullptr);
 		render_pass = VK_NULL_HANDLE;
 	}
+
+	if (timestamp_query_pool != VK_NULL_HANDLE) {
+		vkDestroyQueryPool(rtg.device, timestamp_query_pool, nullptr);
+		timestamp_query_pool = VK_NULL_HANDLE;
+	}
 }
 
 void Tutorial::on_swapchain(RTG &rtg_, RTG::SwapchainEvent const &swapchain) {
@@ -1395,6 +1697,10 @@ void Tutorial::destroy_framebuffers() {
 
 
 void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
+	double cpu_frame_ms = 0.0;
+	CpuTimer frame_timer;
+	frame_timer.start();
+
 	//assert that parameters are valid:
 	assert(&rtg == &rtg_);
 	assert(render_params.workspace_index < workspaces.size());
@@ -1497,8 +1803,40 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 		}
 	}
 
-	if (!object_instances.empty()) { //upload object transforms:
-		size_t needed_bytes = object_instances.size() * sizeof(ObjectsPipeline::Transform);
+	double cpu_cull_ms = 0.0;
+	CpuTimer cull_timer;
+	cull_timer.start();
+
+	std::vector<uint32_t> draw_list;
+	draw_list.reserve(object_instances.size());
+	if (culling_mode == CullingMode::None) {
+		for (uint32_t i = 0; i < (uint32_t)object_instances.size(); ++i) draw_list.push_back(i);
+	} else { //Frustum
+		glm::mat4 CLIP_FROM_WORLD_CULL_glm = to_glm(CLIP_FROM_WORLD_FOR_CULLING);
+
+		for (uint32_t i = 0; i < (uint32_t)object_instances.size(); ++i) {
+			ObjectInstance const& inst = object_instances[i];
+			AABB const& box_local = mesh_aabb_local.at(inst.mesh);
+
+			glm::mat4 WORLD_FROM_LOCAL_glm = to_glm(inst.transform.WORLD_FROM_LOCAL);
+			glm::mat4 CLIP_FROM_LOCAL_glm  = CLIP_FROM_WORLD_CULL_glm * WORLD_FROM_LOCAL_glm;
+
+			if (aabb_intersects_frustum_local(box_local, CLIP_FROM_LOCAL_glm)) {
+				draw_list.push_back(i);
+			}
+		}
+	}
+
+	cpu_cull_ms = cull_timer.ms();
+
+	// std::cout << "instances: " << object_instances.size()
+	// 		<< " visible: " << draw_list.size() << "\n";
+	
+	//if (!object_instances.empty())
+	if (!draw_list.empty()) { //upload object transforms:
+		// size_t needed_bytes = object_instances.size() * sizeof(ObjectsPipeline::Transform);
+		size_t needed_bytes = draw_list.size() * sizeof(ObjectsPipeline::Transform);
+
 		if (workspace.Transforms_src.handle == VK_NULL_HANDLE || workspace.Transforms_src.size < needed_bytes) {
 			//round to next multiple of 4k to avoid re-allocating continuously if vertex count grows slowly:
 			size_t new_bytes = ((needed_bytes + 4096) / 4096) * 4096;
@@ -1555,7 +1893,13 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 		{ //copy transforms into Transforms_src:
 			assert(workspace.Transforms_src.allocation.mapped);
 			ObjectsPipeline::Transform *out = reinterpret_cast< ObjectsPipeline::Transform * >(workspace.Transforms_src.allocation.data()); // Strict aliasing violation, but it doesn't matter
-			for (ObjectInstance const &inst : object_instances) {
+			// for (ObjectInstance const &inst : object_instances) {
+			// 	*out = inst.transform;
+			// 	++out;
+			// }
+
+			for (uint32_t slot = 0; slot < (uint32_t)draw_list.size(); ++slot) {
+				ObjectInstance const &inst = object_instances[draw_list[slot]];
 				*out = inst.transform;
 				++out;
 			}
@@ -1606,6 +1950,16 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			.clearValueCount = uint32_t(clear_values.size()),
 			.pClearValues = clear_values.data(),
 		};
+
+		//
+		vkCmdResetQueryPool(workspace.command_buffer, timestamp_query_pool, 0, 2);
+
+		vkCmdWriteTimestamp(
+			workspace.command_buffer,
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+			timestamp_query_pool,
+			0
+		);
 
 		vkCmdBeginRenderPass(workspace.command_buffer, &begin_info, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -1718,7 +2072,8 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			vkCmdDraw(workspace.command_buffer, uint32_t(lines_vertices.size()), 1, 0, 0);
 		}
 
-		if (!object_instances.empty()) { //draw with the objects pipeline:
+		// if (!object_instances.empty())
+		if (!draw_list.empty()) { //draw with the objects pipeline:
 			vkCmdBindPipeline(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, objects_pipeline.handle);
 
 			{ //use object_vertices (offset 0) as vertex buffer binding 0:
@@ -1745,10 +2100,26 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			//Camera descriptor set is still bound, but unused(!)
 
 			//draw all instances:
-			for (ObjectInstance const &inst : object_instances) {
-				uint32_t index = uint32_t(&inst - &object_instances[0]);
+			// for (ObjectInstance const &inst : object_instances) {
+			// 	uint32_t index = uint32_t(&inst - &object_instances[0]);
 
-				//bind texture descriptor set:
+			// 	//bind material descriptor set:
+			// 	vkCmdBindDescriptorSets(
+			// 		workspace.command_buffer, //command buffer
+			// 		VK_PIPELINE_BIND_POINT_GRAPHICS, //pipeline bind point
+			// 		objects_pipeline.layout, //pipeline layout
+			// 		2, //second set
+			// 		1, &material_descriptors[inst.material], //descriptor sets count, ptr
+			// 		0, nullptr //dynamic offsets count, ptr
+			// 	);
+
+			// 	vkCmdDraw(workspace.command_buffer, inst.vertices.count, 1, inst.vertices.first, index);
+			// }
+
+			for (uint32_t slot = 0; slot < (uint32_t)draw_list.size(); ++slot) {
+				ObjectInstance const& inst = object_instances[draw_list[slot]];
+
+				//bind material descriptor set:
 				vkCmdBindDescriptorSets(
 					workspace.command_buffer, //command buffer
 					VK_PIPELINE_BIND_POINT_GRAPHICS, //pipeline bind point
@@ -1758,18 +2129,27 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 					0, nullptr //dynamic offsets count, ptr
 				);
 
-				vkCmdDraw(workspace.command_buffer, inst.vertices.count, 1, inst.vertices.first, index);
-			}			
+				vkCmdDraw(workspace.command_buffer, inst.vertices.count, 1, inst.vertices.first, slot);
+			}		
 			// vkCmdDraw(workspace.command_buffer, uint32_t(object_vertices.size / sizeof(ObjectsPipeline::Vertex)), 1, 0, 0);
 			// vkCmdDraw(workspace.command_buffer, torus_vertices.count, 1, torus_vertices.first, 0);
 			// vkCmdDraw(workspace.command_buffer, plane_vertices.count, 1, plane_vertices.first, 0);
 
 		}
 		vkCmdEndRenderPass(workspace.command_buffer);
+
+		vkCmdWriteTimestamp(
+			workspace.command_buffer,
+			VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+			timestamp_query_pool,
+			1
+		);
 	}
 
 	//end recording:
 	VK( vkEndCommandBuffer(workspace.command_buffer) );
+
+	cpu_frame_ms = frame_timer.ms();
 
 	
 	{ //submit `workspace.command buffer` for the GPU to run:
@@ -1797,11 +2177,74 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 
 		VK( vkQueueSubmit(rtg.graphics_queue, 1, &submit_info, render_params.workspace_available) );
 	}
+
+	double cpu_wait_gpu_ms = 0.0;
+	CpuTimer cpu_wait_timer;
+	cpu_wait_timer.start();
+
+	uint64_t timestamps[2] = {};
+
+	VK(vkGetQueryPoolResults(
+		rtg.device,
+		timestamp_query_pool,
+		0, 2,
+		sizeof(timestamps),
+		timestamps,
+		sizeof(uint64_t),
+		VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
+	));
+
+	double gpu_ms = double(timestamps[1] - timestamps[0]) * timestamp_period * 1e-6;
+
+	cpu_wait_gpu_ms = cpu_wait_timer.ms();
+
+
+	std::cout
+	<< "instances: " << object_instances.size()
+	<< " visible: " << draw_list.size() << "\n"
+	<< "cpu cull ms: " << cpu_cull_ms << "\n"
+	<< "cpu frame ms: " << cpu_frame_ms << "\n"
+	<< "cpu wait for gpu ms: " << cpu_wait_gpu_ms << "\n"
+	<< "gpu draw ms: " << gpu_ms << "\n\n";
+
+	if (perf_log.is_open()) {
+		perf_log
+		<< frame_id++ << ","
+		<< object_instances.size() << ","
+		<< draw_list.size() << ","
+		<< cpu_cull_ms << ","
+		<< cpu_frame_ms << ","
+		<< cpu_wait_gpu_ms << ","
+		<< gpu_ms
+		<< "\n";
+	}
+
 }
 
 
 void Tutorial::update(float dt) {
 	time += dt;
+
+	if (!anim_paused) anim_time += dt;
+
+	// if (anim_loop && anim_duration > 0.0f) {
+	// 	anim_time = std::fmod(anim_time, anim_duration);
+	// 	if (anim_time < 0.0f) anim_time += anim_duration;
+	// }
+
+	if (anim_duration > 0.0f) {
+		if (anim_loop) {
+			anim_time = std::fmod(anim_time, anim_duration);
+			if (anim_time < 0.0f) anim_time += anim_duration;
+		} else {
+			anim_time = std::min(anim_time, anim_duration);
+		}
+	}
+
+	if (!s72.drivers.empty()) {
+		apply_drivers(anim_time);
+		update_scene_objects();
+	}
 
 	if (camera_mode == CameraMode::Scene) { 
 		//camera rotating around the origin:
@@ -1832,7 +2275,9 @@ void Tutorial::update(float dt) {
 		);
 	} else {
 		assert(0 && "only two camera modes");
-	} 
+	}
+
+	CLIP_FROM_WORLD_FOR_CULLING = CLIP_FROM_WORLD;
 
 	if (debug_camera_mode) {
 		frustum_lines_vertices.clear();
@@ -1858,23 +2303,23 @@ void Tutorial::update(float dt) {
 		}
 	}
 
-	{ //static sun and sky:
-		world.SKY_DIRECTION.x = 0.0f;
-		world.SKY_DIRECTION.y = 0.0f;
-		world.SKY_DIRECTION.z = 1.0f;
+	// { //static sun and sky:
+	// 	world.SKY_DIRECTION.x = 0.0f;
+	// 	world.SKY_DIRECTION.y = 0.0f;
+	// 	world.SKY_DIRECTION.z = 1.0f;
 
-		world.SKY_ENERGY.r = 0.1f;
-		world.SKY_ENERGY.g = 0.1f;
-		world.SKY_ENERGY.b = 0.2f;
+	// 	world.SKY_ENERGY.r = 0.1f;
+	// 	world.SKY_ENERGY.g = 0.1f;
+	// 	world.SKY_ENERGY.b = 0.2f;
 
-		world.SUN_DIRECTION.x = 6.0f / 23.0f;
-		world.SUN_DIRECTION.y = 13.0f / 23.0f;
-		world.SUN_DIRECTION.z = 18.0f / 23.0f;
+	// 	world.SUN_DIRECTION.x = 6.0f / 23.0f;
+	// 	world.SUN_DIRECTION.y = 13.0f / 23.0f;
+	// 	world.SUN_DIRECTION.z = 18.0f / 23.0f;
 
-		world.SUN_ENERGY.r = 1.0f;
-		world.SUN_ENERGY.g = 1.0f;
-		world.SUN_ENERGY.b = 0.9f;
-	}
+	// 	world.SUN_ENERGY.r = 1.0f;
+	// 	world.SUN_ENERGY.g = 1.0f;
+	// 	world.SUN_ENERGY.b = 0.9f;
+	// }
 
 	
 
@@ -2208,8 +2653,21 @@ void Tutorial::on_input(InputEvent const &evt) {
 		return;
 	}
 
+	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_SPACE) {
+		anim_paused = !anim_paused;
+		return;
+	}
+	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_R) {
+		anim_time = 0.0f;
+		return;
+	}
+	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_L) {
+		anim_loop = !anim_loop;
+		return;
+	}
+
 	//general controls:
-	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_TAB) {
+	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_TAB && camera_indices.size() != 0) {
 		//switch camera modes
 		camera_mode = CameraMode((int(camera_mode) + 1) % 2);
 		return;
@@ -2218,6 +2676,11 @@ void Tutorial::on_input(InputEvent const &evt) {
 	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_D) {
 		//switch camera modes
 		debug_camera_mode = !debug_camera_mode;
+		return;
+	}
+
+	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_C) {
+		culling_mode = CullingMode((int(culling_mode) + 1) % 2);
 		return;
 	}
 
@@ -2422,3 +2885,6 @@ void Tutorial::on_input(InputEvent const &evt) {
 
 	
 }
+
+
+
