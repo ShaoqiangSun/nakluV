@@ -13,20 +13,20 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-static inline bool aabb_outside_plane(Tutorial::AABB const &box, glm::vec4 const &plane_local) {
-	glm::vec3 n(plane_local.x, plane_local.y, plane_local.z);
+static inline bool aabb_outside_plane(Tutorial::AABB const &box, glm::vec4 const &plane) {
+	glm::vec3 n(plane.x, plane.y, plane.z);
 
 	glm::vec3 v;
     v.x = (n.x >= 0.0f) ? box.max.x : box.min.x;
     v.y = (n.y >= 0.0f) ? box.max.y : box.min.y;
     v.z = (n.z >= 0.0f) ? box.max.z : box.min.z;
 
-	float dist = plane_local.x * v.x + plane_local.y * v.y + plane_local.z * v.z + plane_local.w;
+	float dist = plane.x * v.x + plane.y * v.y + plane.z * v.z + plane.w;
     return dist < 0.0f;
 }
 
 
-static inline bool aabb_intersects_frustum_local(Tutorial::AABB const &box_local, glm::mat4 const& CLIP_FROM_LOCAL) {
+static inline bool aabb_intersects_frustum(Tutorial::AABB const &box_target_space, glm::mat4 const& transform_matrix) {
 	//Vulkan clip constraints (x,y in [-w,w], z in [0,w]):
     //left:   x + w >= 0
     //right: -x + w >= 0
@@ -43,13 +43,42 @@ static inline bool aabb_intersects_frustum_local(Tutorial::AABB const &box_local
         glm::vec4( 0,  0, -1, 1), //far
     };
 
-	glm::mat4 CLIP_FROM_LOCAL_T = glm::transpose(CLIP_FROM_LOCAL);
+	glm::mat4 transform_matrix_T = glm::transpose(transform_matrix);
 
-	for (int i = 0; i < 6; ++i) {
-        glm::vec4 plane_local = CLIP_FROM_LOCAL_T * planes_clip[i];
-        if (aabb_outside_plane(box_local, plane_local)) return false;
+	for (uint32_t i = 0; i < 6; ++i) {
+        glm::vec4 plane_target_space = transform_matrix_T * planes_clip[i];
+        if (aabb_outside_plane(box_target_space, plane_target_space)) return false;
     }
     return true;
+}
+
+static inline Tutorial::AABB aabb_local_to_world(Tutorial::AABB const& box_local, glm::mat4 const& WORLD_FROM_LOCAL) {
+	glm::vec3 corners[8] = {
+        {box_local.min.x, box_local.min.y, box_local.min.z},
+        {box_local.max.x, box_local.min.y, box_local.min.z},
+        {box_local.min.x, box_local.max.y, box_local.min.z},
+        {box_local.max.x, box_local.max.y, box_local.min.z},
+        {box_local.min.x, box_local.min.y, box_local.max.z},
+        {box_local.max.x, box_local.min.y, box_local.max.z},
+        {box_local.min.x, box_local.max.y, box_local.max.z},
+        {box_local.max.x, box_local.max.y, box_local.max.z},
+    };
+
+	Tutorial::AABB out;
+
+	for (int i = 0; i < 8; ++i) {
+        glm::vec3 p = glm::vec3(WORLD_FROM_LOCAL * glm::vec4(corners[i], 1.0f));
+        out.min = glm::min(out.min, p);
+        out.max = glm::max(out.max, p);
+    }
+    return out;
+}
+
+static inline Tutorial::AABB aabb_merge(Tutorial::AABB const& a, Tutorial::AABB const& b) {
+    Tutorial::AABB out;
+    out.min = glm::min(a.min, b.min);
+    out.max = glm::max(a.max, b.max);
+    return out;
 }
 
 static inline float clamp01(float x) {
@@ -315,6 +344,48 @@ void Tutorial::append_frustum_lines_world(glm::mat4 const &CLIP_FROM_WORLD, uint
     edge(0,4); edge(1,5); edge(2,6); edge(3,7);
 }
 
+void Tutorial::append_bvh_lines_world(AABB const &local, glm::mat4 const &WORLD_FROM_LOCAL, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+	glm::vec3 corners[8] = {
+        {local.min.x, local.min.y, local.min.z},
+        {local.max.x, local.min.y, local.min.z},
+        {local.max.x, local.max.y, local.min.z},
+        {local.min.x, local.max.y, local.min.z},
+        {local.min.x, local.min.y, local.max.z},
+        {local.max.x, local.min.y, local.max.z},
+        {local.max.x, local.max.y, local.max.z},
+        {local.min.x, local.max.y, local.max.z},
+    };
+
+	glm::vec3 p[8];
+	for (int i = 0; i < 8; ++i) {
+        p[i] = WORLD_FROM_LOCAL * glm::vec4(corners[i], 1.0f);
+    }
+
+	auto edge = [&](int idx1, int idx2) { 
+		PosColVertex v1, v2;
+		v1.Position.x = p[idx1].x; v1.Position.y = p[idx1].y; v1.Position.z = p[idx1].z;
+		v1.Color.r = r; v1.Color.g = g; v1.Color.b = b; v1.Color.a = a;
+
+		v2.Position.x = p[idx2].x; v2.Position.y = p[idx2].y; v2.Position.z = p[idx2].z;
+		v2.Color.r = r; v2.Color.g = g; v2.Color.b = b; v2.Color.a = a;
+
+		bvh_lines_vertices.push_back(v1);
+    	bvh_lines_vertices.push_back(v2);
+
+		// lines_vertices.push_back(v1);
+    	// lines_vertices.push_back(v2);
+	};
+
+
+    // bottom
+    edge(0,1); edge(1,2); edge(2,3); edge(3,0);
+    // top
+    edge(4,5); edge(5,6); edge(6,7); edge(7,4);
+    // verticals
+    edge(0,4); edge(1,5); edge(2,6); edge(3,7);
+
+}
+
 static inline mat4 to_mat4(glm::mat4 const& m) {
     mat4 out;
     static_assert(sizeof(out) == sizeof(glm::mat4), "sizes must match");
@@ -329,7 +400,9 @@ static inline glm::mat4 to_glm(mat4 const& m) {
     return out;
 }
 
-void Tutorial::traverse_node(S72::Node* node, glm::mat4 const& parent) {
+void Tutorial::traverse_node(S72::Node* node, glm::mat4 const& parent, bool inherited_dynamic) {
+	bool dynamic_here = inherited_dynamic || (driven_nodes.count(node) != 0);
+
 	glm::mat4 local =
 		glm::translate(glm::mat4(1.0f), node->translation) *
 		glm::mat4_cast(node->rotation) *
@@ -366,6 +439,9 @@ void Tutorial::traverse_node(S72::Node* node, glm::mat4 const& parent) {
 		});
 
 		node_to_instance[node] = inst_idx;
+
+		if (dynamic_here) dynamic_instances.push_back(inst_idx);
+        else bvh_indices.push_back(inst_idx);
 	}
 
 	if (node->light != nullptr) {
@@ -421,7 +497,7 @@ void Tutorial::traverse_node(S72::Node* node, glm::mat4 const& parent) {
 	}
 
 	for (S72::Node* child : node->children) {
-		traverse_node(child, world_glm);
+		traverse_node(child, world_glm, dynamic_here);
 	}
 
 }
@@ -475,10 +551,13 @@ void Tutorial::build_scene_objects() {
 
 	glm::mat4 parent(1.0f);
 
+	mark_driven_nodes();
+
 	for (S72::Node* root: s72.scene.roots) {
-		traverse_node(root, parent);
+		traverse_node(root, parent, false);
 	}
 
+	build_bvh_for_static();
 }
 
 void Tutorial::update_scene_objects() {
@@ -497,7 +576,7 @@ void Tutorial::update_object_instances_camera() {
 	}
 }
 
-void Tutorial::build_material_texture_indices() {
+void Tutorial::build_material_texture() {
 	materials_list.clear();
 	materials_list.reserve(s72.materials.size());
 	textures_list.clear();
@@ -734,7 +813,112 @@ static S72 build_cpu_bottleneck_scene(std::string const& base_s72_file, std::str
 	return s72;
 }
 
+void Tutorial::mark_driven_nodes() {
+    driven_nodes.clear();
+    for (auto const &d : s72.drivers) {
+        driven_nodes.insert(&d.node);
+    }
+}
 
+int Tutorial::build_bvh(std::vector<std::pair<AABB,uint32_t>> &items, int start, int count) {
+	BVHNode node;
+
+	AABB box;
+
+	for (uint32_t i = 0; i < count; ++i) box = aabb_merge(box, items[start + i].first);
+    node.box_world = box;
+
+	int node_idx = int(bvh_nodes.size());
+    bvh_nodes.push_back(node);
+
+	if (count <= 4) {
+        //write leaf range into bvh_indices
+        uint32_t leaf_start = uint32_t(bvh_indices.size());
+        for (int i = 0; i < count; ++i) bvh_indices.push_back(items[start + i].second);
+
+        bvh_nodes[node_idx].start = leaf_start;
+        bvh_nodes[node_idx].count = uint32_t(count);
+        return node_idx;
+    }
+
+	glm::vec3 ext = box.max - box.min;
+    int axis = (ext.y > ext.x) ? 1 : 0;
+    if (ext.z > ext[axis]) axis = 2;
+
+    auto centroid = [&](AABB const& b)->float {
+        return 0.5f*(b.min[axis] + b.max[axis]);
+    };
+
+	int mid = start + count / 2;
+    std::nth_element(
+        items.begin() + start,
+        items.begin() + mid,
+        items.begin() + start + count,
+        [&](auto const& A, auto const& B){ return centroid(A.first) < centroid(B.first); }
+    );
+
+	int left = build_bvh(items, start, mid - start);
+    int right = build_bvh(items, mid, start + count - mid);
+
+	bvh_nodes[node_idx].left = left;
+    bvh_nodes[node_idx].right = right;
+    bvh_nodes[node_idx].count = 0;
+    return node_idx;
+}
+
+void Tutorial::build_bvh_for_static() {
+	std::vector<uint32_t> static_in = bvh_indices;
+    bvh_indices.clear();
+    bvh_nodes.clear();
+
+	if (static_in.empty()) return;
+
+    std::vector<std::pair<AABB,uint32_t>> items;
+    items.reserve(static_in.size());
+
+	for (uint32_t inst_idx : static_in) {
+        ObjectInstance const& inst = object_instances[inst_idx];
+        AABB const& box_local = mesh_aabb_local.at(inst.mesh);
+        glm::mat4 W = to_glm(inst.transform.WORLD_FROM_LOCAL);
+        AABB box_world = aabb_local_to_world(box_local, W);
+        items.emplace_back(box_world, inst_idx);
+    }
+
+	build_bvh(items, 0, int(items.size()));
+}
+
+void Tutorial::cull_with_bvh(glm::mat4 const& CLIP_FROM_WORLD_CULL_glm, std::vector<uint32_t> &draw_list){
+	if (bvh_nodes.empty()) return;
+
+    std::vector<int> stack;
+    stack.reserve(bvh_nodes.size());
+    stack.push_back(0);
+
+	while (!stack.empty()) {
+		int node_idx = stack.back();
+        stack.pop_back();
+		BVHNode const &node = bvh_nodes[node_idx];
+		if (!aabb_intersects_frustum(node.box_world, CLIP_FROM_WORLD_CULL_glm)) continue;
+
+		if (node.count > 0) {
+			for (uint32_t k = 0; k < node.count; ++k) {
+				uint32_t inst_idx = bvh_indices[node.start + k];
+
+				ObjectInstance const &inst = object_instances[inst_idx];
+				AABB const &box_local = mesh_aabb_local.at(inst.mesh);
+				glm::mat4 W = to_glm(inst.transform.WORLD_FROM_LOCAL);
+                glm::mat4 CLIP_FROM_LOCAL_glm = CLIP_FROM_WORLD_CULL_glm * W;
+				if (aabb_intersects_frustum(box_local, CLIP_FROM_LOCAL_glm)) {
+					// append_bvh_lines_world(box_local, W, 255, 255, 255);
+                    draw_list.push_back(inst_idx);
+                }
+			}
+		} else {
+            if (node.left >= 0) stack.push_back(node.left);
+            if (node.right >= 0) stack.push_back(node.right);
+        }
+	}
+}
 
 
 Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
@@ -747,8 +931,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 				s72 = build_cpu_bottleneck_scene("scenes/cpu-bottleneck.s72", "Rounded-Cube" ,N_culled);
 				
 			}
-			
-			else if (rtg.configuration.test_mode == "gpu") {
+			else {
 				if (!rtg.configuration.scene_file.empty()) s72 = S72::load(rtg.configuration.scene_file);
 			}
 			
@@ -765,6 +948,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 			if (!rtg.configuration.culling_mode.empty()) {
 				if (rtg.configuration.culling_mode == "none") culling_mode = CullingMode::None;
 				else if (rtg.configuration.culling_mode == "frustum") culling_mode = CullingMode::Frustum;
+				else if (rtg.configuration.culling_mode == "bvh") culling_mode = CullingMode::BVH;
 				else throw std::runtime_error(
 					"Culling mode '" + rtg.configuration.culling_mode + "' is incorrect."
 				);
@@ -782,10 +966,10 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 		}
 		else if (!rtg.configuration.scene_file.empty()) {
 			s72 = S72::load(rtg.configuration.scene_file);
-			print_info(s72);
-			print_scene_graph(s72);
-			print_mesh_file(s72);
-			print_data_file(s72);
+			// print_info(s72);
+			// print_scene_graph(s72);
+			// print_mesh_file(s72);
+			// print_data_file(s72);
 
 			if (!rtg.configuration.camera_name.empty()) {
 				if (s72.cameras.count(rtg.configuration.camera_name) == 0) {
@@ -1241,7 +1425,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 		rtg.helpers.transfer_to_buffer(vertices.data(), bytes, object_vertices);
 	}
 
-	build_material_texture_indices();
+	build_material_texture();
 	build_scene_objects();
 	cache_rest_pose_and_duration();
 
@@ -1698,7 +1882,7 @@ void Tutorial::destroy_framebuffers() {
 
 void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 	double cpu_frame_ms = 0.0;
-	CpuTimer frame_timer;
+	CPUTimer frame_timer;
 	frame_timer.start();
 
 	//assert that parameters are valid:
@@ -1804,14 +1988,14 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 	}
 
 	double cpu_cull_ms = 0.0;
-	CpuTimer cull_timer;
+	CPUTimer cull_timer;
 	cull_timer.start();
 
 	std::vector<uint32_t> draw_list;
 	draw_list.reserve(object_instances.size());
 	if (culling_mode == CullingMode::None) {
 		for (uint32_t i = 0; i < (uint32_t)object_instances.size(); ++i) draw_list.push_back(i);
-	} else { //Frustum
+	} else if (culling_mode == CullingMode::Frustum) { //Frustum
 		glm::mat4 CLIP_FROM_WORLD_CULL_glm = to_glm(CLIP_FROM_WORLD_FOR_CULLING);
 
 		for (uint32_t i = 0; i < (uint32_t)object_instances.size(); ++i) {
@@ -1821,8 +2005,26 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			glm::mat4 WORLD_FROM_LOCAL_glm = to_glm(inst.transform.WORLD_FROM_LOCAL);
 			glm::mat4 CLIP_FROM_LOCAL_glm  = CLIP_FROM_WORLD_CULL_glm * WORLD_FROM_LOCAL_glm;
 
-			if (aabb_intersects_frustum_local(box_local, CLIP_FROM_LOCAL_glm)) {
+			if (aabb_intersects_frustum(box_local, CLIP_FROM_LOCAL_glm)) {
 				draw_list.push_back(i);
+			}
+		}
+	} else if (culling_mode == CullingMode::BVH) {
+		glm::mat4 CLIP_FROM_WORLD_CULL_glm = to_glm(CLIP_FROM_WORLD_FOR_CULLING);
+
+		// bvh_lines_vertices.clear();
+		cull_with_bvh(CLIP_FROM_WORLD_CULL_glm, draw_list);
+
+		//dynamic objects
+		for (uint32_t inst_idx : dynamic_instances) {
+			ObjectInstance const& inst = object_instances[inst_idx];
+			AABB const& box_local = mesh_aabb_local.at(inst.mesh);
+
+			glm::mat4 WORLD_FROM_LOCAL_glm = to_glm(inst.transform.WORLD_FROM_LOCAL);
+			glm::mat4 CLIP_FROM_LOCAL_glm = CLIP_FROM_WORLD_CULL_glm * WORLD_FROM_LOCAL_glm;
+
+			if (aabb_intersects_frustum(box_local, CLIP_FROM_LOCAL_glm)) {
+				draw_list.push_back(inst_idx);
 			}
 		}
 	}
@@ -2179,7 +2381,7 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 	}
 
 	double cpu_wait_gpu_ms = 0.0;
-	CpuTimer cpu_wait_timer;
+	CPUTimer cpu_wait_timer;
 	cpu_wait_timer.start();
 
 	uint64_t timestamps[2] = {};
@@ -2199,13 +2401,13 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 	cpu_wait_gpu_ms = cpu_wait_timer.ms();
 
 
-	std::cout
-	<< "instances: " << object_instances.size()
-	<< " visible: " << draw_list.size() << "\n"
-	<< "cpu cull ms: " << cpu_cull_ms << "\n"
-	<< "cpu frame ms: " << cpu_frame_ms << "\n"
-	<< "cpu wait for gpu ms: " << cpu_wait_gpu_ms << "\n"
-	<< "gpu draw ms: " << gpu_ms << "\n\n";
+	// std::cout
+	// << "instances: " << object_instances.size()
+	// << " visible: " << draw_list.size() << "\n"
+	// << "cpu cull ms: " << cpu_cull_ms << "\n"
+	// << "cpu frame ms: " << cpu_frame_ms << "\n"
+	// << "cpu wait for gpu ms: " << cpu_wait_gpu_ms << "\n"
+	// << "gpu draw ms: " << gpu_ms << "\n\n";
 
 	if (perf_log.is_open()) {
 		perf_log
@@ -2240,6 +2442,7 @@ void Tutorial::update(float dt) {
 			anim_time = std::min(anim_time, anim_duration);
 		}
 	}
+
 
 	if (!s72.drivers.empty()) {
 		apply_drivers(anim_time);
@@ -2301,6 +2504,12 @@ void Tutorial::update(float dt) {
 		for (auto & v : frustum_lines_vertices) {
 			lines_vertices.push_back(v);
 		}
+
+		// std::cout << "bvh_lines_vertices = " << bvh_lines_vertices.size() << "\n";
+
+		// for (auto & v : bvh_lines_vertices) {
+		// 	lines_vertices.push_back(v);
+		// }
 	}
 
 	// { //static sun and sky:
@@ -2680,7 +2889,7 @@ void Tutorial::on_input(InputEvent const &evt) {
 	}
 
 	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_C) {
-		culling_mode = CullingMode((int(culling_mode) + 1) % 2);
+		culling_mode = CullingMode((int(culling_mode) + 1) % 3);
 		return;
 	}
 

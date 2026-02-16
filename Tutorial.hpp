@@ -9,6 +9,7 @@
 #include "S72.hpp"
 
 #include <fstream>
+#include <unordered_set>
 
 struct Tutorial : RTG::Application {
 
@@ -23,7 +24,15 @@ struct Tutorial : RTG::Application {
 
 	};
 
-	struct CpuTimer {
+	struct BVHNode {
+		AABB box_world;
+		int left = -1;
+		int right = -1;
+		uint32_t start = 0;
+		uint32_t count = 0;
+	};
+
+	struct CPUTimer {
 		using clock = std::chrono::steady_clock;
 		clock::time_point t0;
 
@@ -35,18 +44,24 @@ struct Tutorial : RTG::Application {
 		}
 	};
 
+
 	void load_mesh_vertices(S72 const &s72, std::vector< PosNorTanTexVertex > &vertices_pool);
 	void append_bbox_lines_world(AABB const &local, glm::mat4 const &WORLD_FROM_LOCAL, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff);
 	void append_frustum_lines_world(glm::mat4 const &CLIP_FROM_WORLD, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff);
-	void traverse_node(S72::Node* node, glm::mat4 const& parent);
+	void append_bvh_lines_world(AABB const &local, glm::mat4 const &WORLD_FROM_LOCAL, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff);
+	void traverse_node(S72::Node* node, glm::mat4 const& parent, bool inherited_dynamic);
 	void update_transforms_node(S72::Node* node, glm::mat4 const& parent);
 	void build_scene_objects();
 	void update_scene_objects();
 	void update_object_instances_camera();
-	void build_material_texture_indices();
+	void build_material_texture();
 	void load_all_textures();
 	void cache_rest_pose_and_duration();
 	void apply_drivers(float t);
+	void mark_driven_nodes();
+	int build_bvh(std::vector<std::pair<AABB,uint32_t>> &items, int start, int count);
+	void build_bvh_for_static();
+	void cull_with_bvh(glm::mat4 const& CLIP_FROM_WORLD_CULL_glm, std::vector<uint32_t> &draw_list);
 	
 
 	//kept for use in destructor:
@@ -247,6 +262,7 @@ struct Tutorial : RTG::Application {
 	enum class CullingMode {
 		None,
 		Frustum,
+		BVH,
 	};
 
 	CameraMode camera_mode = CameraMode::Free;
@@ -281,6 +297,7 @@ struct Tutorial : RTG::Application {
 	std::vector< LinesPipeline::Vertex > lines_vertices;
 	std::vector< LinesPipeline::Vertex > bbox_lines_vertices;
 	std::vector< LinesPipeline::Vertex > frustum_lines_vertices;
+	std::vector< LinesPipeline::Vertex > bvh_lines_vertices;
 
 	ObjectsPipeline::World world;
 
@@ -292,6 +309,12 @@ struct Tutorial : RTG::Application {
 	};
 	std::vector< ObjectInstance > object_instances;
 	std::unordered_map<S72::Node*, uint32_t> node_to_instance;
+	std::vector<uint32_t> dynamic_instances;
+	std::unordered_set<S72::Node*> driven_nodes;
+
+	std::vector<uint32_t> bvh_indices;
+	std::vector<BVHNode> bvh_nodes;
+	bool bvh_built = false;
 
 	VkQueryPool timestamp_query_pool = VK_NULL_HANDLE;
 	float timestamp_period = 0.0f;

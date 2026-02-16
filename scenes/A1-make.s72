@@ -1,0 +1,237 @@
+["s72-v2",
+{
+	"type":"NODE",
+	"name":"AtomRoot",
+	"translation":[0,0,0],
+	"rotation":[0,0,0,1],
+	"scale":[1,1,1],
+	"children":[
+		"Nucleus",
+		"E1_Tilt","E2_Tilt","E3_Tilt","E4_Tilt"
+	]
+},
+{
+	"type":"NODE",
+	"name":"Nucleus",
+	"translation":[0,0,0],
+	"rotation":[0,0,0,1],
+	"scale":[1,1,1],
+	"children":[
+		"P1","P2","P3","P4",
+		"N1","N2","N3","N4"
+	]
+},
+{ "type":"NODE","name":"P1","translation":[ 0.10, 0.10, 0.10],"rotation":[0,0,0,1],"scale":[0.15,0.15,0.15],"mesh":"Sphere-Blue" },
+{ "type":"NODE","name":"P2","translation":[ 0.10,-0.10,-0.10],"rotation":[0,0,0,1],"scale":[0.15,0.15,0.15],"mesh":"Sphere-Blue" },
+{ "type":"NODE","name":"P3","translation":[-0.10, 0.10,-0.10],"rotation":[0,0,0,1],"scale":[0.15,0.15,0.15],"mesh":"Sphere-Blue" },
+{ "type":"NODE","name":"P4","translation":[-0.10,-0.10, 0.10],"rotation":[0,0,0,1],"scale":[0.15,0.15,0.15],"mesh":"Sphere-Blue" },
+
+{ "type":"NODE","name":"N1","translation":[-0.10,-0.10,-0.10],"rotation":[0,0,0,1],"scale":[0.15,0.15,0.15],"mesh":"Sphere-Red" },
+{ "type":"NODE","name":"N2","translation":[-0.10, 0.10, 0.10],"rotation":[0,0,0,1],"scale":[0.15,0.15,0.15],"mesh":"Sphere-Red" },
+{ "type":"NODE","name":"N3","translation":[ 0.10,-0.10, 0.10],"rotation":[0,0,0,1],"scale":[0.15,0.15,0.15],"mesh":"Sphere-Red" },
+{ "type":"NODE","name":"N4","translation":[ 0.10, 0.10,-0.10],"rotation":[0,0,0,1],"scale":[0.15,0.15,0.15],"mesh":"Sphere-Red" },
+
+{ "type":"NODE","name":"E1_Tilt","translation":[0,0,0],"rotation":[0.574,0.000,0.000,0.819],"scale":[1,1,1],"children":["E1_Spin"] },
+{ "type":"NODE","name":"E1_Spin","translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1],"children":["E1a","E1b"] },
+
+{ "type":"NODE","name":"E2_Tilt","translation":[0,0,0],"rotation":[0.000,0.609,0.000,0.793],"scale":[1,1,1],"children":["E2_Spin"] },
+{ "type":"NODE","name":"E2_Spin","translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1],"children":["E2a","E2b"] },
+
+{ "type":"NODE","name":"E3_Tilt","translation":[0,0,0],"rotation":[0.313,0.313,0.000,0.896],"scale":[1,1,1],"children":["E3_Spin"] },
+{ "type":"NODE","name":"E3_Spin","translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1],"children":["E3a","E3b"] },
+
+{ "type":"NODE","name":"E4_Tilt","translation":[0,0,0],"rotation":[0.000,0.313,0.313,0.896],"scale":[1,1,1],"children":["E4_Spin"] },
+{ "type":"NODE","name":"E4_Spin","translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1],"children":["E4a","E4b"] },
+
+{ "type":"NODE","name":"E1a","translation":[1.35,0,0],"rotation":[0,0,0,1],"scale":[0.02,0.02,0.02],"mesh":"Sphere-White" },
+{ "type":"NODE","name":"E1b","translation":[-1.35,0,0],"rotation":[0,0,0,1],"scale":[0.02,0.02,0.02],"mesh":"Sphere-White" },
+
+{ "type":"NODE","name":"E2a","translation":[1.75,0,0],"rotation":[0,0,0,1],"scale":[0.02,0.02,0.02],"mesh":"Sphere-White" },
+{ "type":"NODE","name":"E2b","translation":[-1.75,0,0],"rotation":[0,0,0,1],"scale":[0.02,0.02,0.02],"mesh":"Sphere-White" },
+
+{ "type":"NODE","name":"E3a","translation":[2.15,0,0],"rotation":[0,0,0,1],"scale":[0.02,0.02,0.02],"mesh":"Sphere-White" },
+{ "type":"NODE","name":"E3b","translation":[-2.15,0,0],"rotation":[0,0,0,1],"scale":[0.02,0.02,0.02],"mesh":"Sphere-White" },
+
+{ "type":"NODE","name":"E4a","translation":[2.55,0,0],"rotation":[0,0,0,1],"scale":[0.02,0.02,0.02],"mesh":"Sphere-White" },
+{ "type":"NODE","name":"E4b","translation":[-2.55,0,0],"rotation":[0,0,0,1],"scale":[0.02,0.02,0.02],"mesh":"Sphere-White" },
+{
+	"type":"DRIVER",
+	"name":"E1_spin",
+	"node":"E1_Spin",
+	"channel":"rotation",
+	"times":[0,0.30,0.60,0.90,1.20],
+	"values":[
+		0,0,0,1,
+		0,0,0.7071,0.7071,
+		0,0,1,0,
+		0,0,0.7071,-0.7071,
+		0,0,0,-1
+	],
+	"interpolation":"SLERP"
+},
+{
+	"type":"DRIVER",
+	"name":"E2_spin",
+	"node":"E2_Spin",
+	"channel":"rotation",
+	"times":[0,0.375,0.75,1.125,1.50],
+	"values":[
+		0,0,0,1,
+		0,0,0.7071,0.7071,
+		0,0,1,0,
+		0,0,0.7071,-0.7071,
+		0,0,0,-1
+	],
+	"interpolation":"SLERP"
+},
+{
+	"type":"DRIVER",
+	"name":"E3_spin",
+	"node":"E3_Spin",
+	"channel":"rotation",
+	"times":[0,0.45,0.90,1.35,1.80],
+	"values":[
+		0,0,0,1,
+		0,0,0.7071,0.7071,
+		0,0,1,0,
+		0,0,0.7071,-0.7071,
+		0,0,0,-1
+	],
+	"interpolation":"SLERP"
+},
+{
+	"type":"DRIVER",
+	"name":"E4_spin",
+	"node":"E4_Spin",
+	"channel":"rotation",
+	"times":[0,0.525,1.05,1.575,2.10],
+	"values":[
+		0,0,0,1,
+		0,0,0.7071,0.7071,
+		0,0,1,0,
+		0,0,0.7071,-0.7071,
+		0,0,0,-1
+	],
+	"interpolation":"SLERP"
+},
+{
+	"type":"MATERIAL",
+	"name":"lambertian:blue",
+	"lambertian":{
+		"albedo":[ 0.2, 0.7, 0.9 ]
+	}
+},
+{
+	"type":"MATERIAL",
+	"name":"lambertian:red",
+	"lambertian":{
+		"albedo":[ 0.85, 0.18, 0.18]
+	}
+},
+{
+	"type":"MATERIAL",
+	"name":"lambertian:white",
+	"lambertian":{
+		"albedo":[ 1.0, 1.0, 1.0]
+	}
+},
+{
+	"type":"MESH",
+	"name":"Sphere-Blue",
+	"topology":"TRIANGLE_LIST",
+	"count":960,
+	"attributes":{
+		"POSITION":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":0, "stride":48, "format":"R32G32B32_SFLOAT" },
+		"NORMAL":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":12, "stride":48, "format":"R32G32B32_SFLOAT" },
+		"TANGENT":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":24, "stride":48, "format":"R32G32B32A32_SFLOAT" },
+		"TEXCOORD":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":40, "stride":48, "format":"R32G32_SFLOAT" }
+	},
+	"material":"lambertian:blue"
+},
+{
+	"type":"MESH",
+	"name":"Sphere-Red",
+	"topology":"TRIANGLE_LIST",
+	"count":960,
+	"attributes":{
+		"POSITION":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":0, "stride":48, "format":"R32G32B32_SFLOAT" },
+		"NORMAL":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":12, "stride":48, "format":"R32G32B32_SFLOAT" },
+		"TANGENT":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":24, "stride":48, "format":"R32G32B32A32_SFLOAT" },
+		"TEXCOORD":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":40, "stride":48, "format":"R32G32_SFLOAT" }
+	},
+	"material":"lambertian:red"
+},
+{
+	"type":"MESH",
+	"name":"Sphere-White",
+	"topology":"TRIANGLE_LIST",
+	"count":960,
+	"attributes":{
+		"POSITION":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":0, "stride":48, "format":"R32G32B32_SFLOAT" },
+		"NORMAL":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":12, "stride":48, "format":"R32G32B32_SFLOAT" },
+		"TANGENT":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":24, "stride":48, "format":"R32G32B32A32_SFLOAT" },
+		"TEXCOORD":{ "src":"sphereflake.Sphere.pnTt.b72", "offset":40, "stride":48, "format":"R32G32_SFLOAT" }
+	},
+	"material":"lambertian:white"
+},
+{
+
+	"type":"CAMERA",
+	"name":"Fixed-Camera",
+	"perspective":{
+		"aspect":1.77778,
+		"vfov":0.47109,
+		"near":0.1,
+		"far":1000
+	}
+},
+{
+	"type":"NODE",
+	"name":"Fixed-Camera",
+	"translation":[0,0,6],
+  	"rotation":[0,0,0,1],
+  	"scale":[1,1,1],
+	"camera":"Fixed-Camera"
+},
+{
+
+	"type":"LIGHT",
+	"name":"Sky",
+	"tint":[0.745902, 0.755708, 1],
+	"sun":{
+		"angle":3.14159,
+		"strength":1
+	}
+},
+{
+	"type":"NODE",
+	"name":"Sky",
+	"translation":[0.589639,-0.959608,3.01802],
+	"rotation":[0,0,0,1],
+	"scale":[1,1,1],
+	"light":"Sky"
+},
+{
+
+	"type":"LIGHT",
+	"name":"Sun",
+	"tint":[1, 0.842731, 0.87427],
+	"sun":{
+		"angle":0,
+		"strength":1
+	}
+},
+{
+	"type":"NODE",
+	"name":"Sun",
+	"translation":[3.91369,0.0570364,3.92194],
+	"rotation":[0.0217064,0.225377,-0.0333432,0.973459],
+	"scale":[1,1,1],
+	"light":"Sun"
+},
+{
+	"type":"SCENE",
+	"name":"atom-scene",
+	"roots":["AtomRoot", "Fixed-Camera", "Sky", "Sun"]
+}
+]
