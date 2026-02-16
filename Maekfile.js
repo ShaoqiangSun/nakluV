@@ -86,7 +86,8 @@ function custom_flags_and_rules() {
 		maek.options.CPPFlags = [
 			'-O2',
 			`-I${VULKAN_SDK}/include`,
-			`-I${GLFW_DIR}/include`
+			`-I${GLFW_DIR}/include`,
+			`-Iexternal/glm`,
 		];
 
 		maek.options.LINKLibs = [
@@ -113,6 +114,7 @@ function custom_flags_and_rules() {
 			'/wd4146', //-1U is unsigned
 			`/I${VULKAN_SDK}/Include`,
 			`/I../glfw-3.4.bin.WIN64/include`,
+			`-Iexternal/glm`,
 		];
 
 		maek.options.LINKLibs = [
@@ -138,6 +140,7 @@ function custom_flags_and_rules() {
 			`-I${VULKAN_SDK}/include`,
 			`-I/opt/homebrew/include`, //for brew-installed GLFW
 			`-I../glfw-3.4.bin.MACOS/include`, //for release from github
+			`-Iexternal/glm`,
 		];
 
 		maek.options.LINKLibs = [
