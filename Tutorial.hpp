@@ -10,27 +10,17 @@
 
 #include <fstream>
 #include <unordered_set>
+#include <memory>
+
+#include "MaterialSystem.hpp"
+
+struct SceneViewer;
 
 struct Tutorial : RTG::Application {
 
 	Tutorial(RTG &);
 	Tutorial(Tutorial const &) = delete; //you shouldn't be copying this object
 	~Tutorial();
-
-	S72 s72;
-	struct AABB {
-		glm::vec3 min = glm::vec3( std::numeric_limits<float>::infinity());
-		glm::vec3 max = glm::vec3(-std::numeric_limits<float>::infinity());
-
-	};
-
-	struct BVHNode {
-		AABB box_world;
-		int left = -1;
-		int right = -1;
-		uint32_t start = 0;
-		uint32_t count = 0;
-	};
 
 	struct CPUTimer {
 		using clock = std::chrono::steady_clock;
@@ -43,29 +33,13 @@ struct Tutorial : RTG::Application {
 			return std::chrono::duration<double, std::milli>(t1 - t0).count();
 		}
 	};
-
-
-	void load_mesh_vertices(S72 const &s72, std::vector< PosNorTanTexVertex > &vertices_pool);
-	void append_bbox_lines_world(AABB const &local, glm::mat4 const &WORLD_FROM_LOCAL, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff);
-	void append_frustum_lines_world(glm::mat4 const &CLIP_FROM_WORLD, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff);
-	void append_bvh_lines_world(AABB const &local, glm::mat4 const &WORLD_FROM_LOCAL, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff);
-	void traverse_node(S72::Node* node, glm::mat4 const& parent, bool inherited_dynamic);
-	void update_transforms_node(S72::Node* node, glm::mat4 const& parent);
-	void build_scene_objects();
-	void update_scene_objects();
-	void update_object_instances_camera();
-	void build_material_texture();
-	void load_all_textures();
-	void cache_rest_pose_and_duration();
-	void apply_drivers(float t);
-	void mark_driven_nodes();
-	int build_bvh(std::vector<std::pair<AABB,uint32_t>> &items, int start, int count);
-	void build_bvh_for_static();
-	void cull_with_bvh(glm::mat4 const& CLIP_FROM_WORLD_CULL_glm, std::vector<uint32_t> &draw_list);
 	
 
 	//kept for use in destructor:
 	RTG &rtg;
+	MaterialSystem material_system;
+	std::unique_ptr<SceneViewer> scene_viewer;
+	
 
 	//--------------------------------------------------------------------
 	//Resources that last the lifetime of the application:
@@ -154,13 +128,6 @@ struct Tutorial : RTG::Application {
 		void destroy(RTG &);
 	} objects_pipeline;
 
-	struct MaterialTextureInfo {
-		uint32_t albedo_tex_index = 0;
-		uint32_t has_albedo_tex = 0;
-		
-	};
-
-	uint32_t default_texture_index;
 
 	//pools from which per-workspace things are allocated:
 	VkCommandPool command_pool = VK_NULL_HANDLE;
@@ -194,31 +161,6 @@ struct Tutorial : RTG::Application {
 	//-------------------------------------------------------------------
 	//static scene resources:
 	Helpers::AllocatedBuffer object_vertices;
-	struct ObjectVertices {
-		uint32_t first = 0;
-		uint32_t count = 0;
-	};
-	ObjectVertices plane_vertices;
-	ObjectVertices torus_vertices;
-
-	//load .s72 scene mesh vertices
-	std::unordered_map<std::string, uint32_t> mesh_id;
-	std::vector<ObjectVertices> mesh_vertices;
-	std::vector<AABB> mesh_aabb_local;
-	
-
-	std::unordered_map<S72::Material const*, uint32_t> material_id;
-	std::unordered_map<S72::Texture const*, uint32_t> texture_id;
-
-	std::vector<S72::Material const*> materials_list;
-	std::vector<S72::Texture const*> textures_list;
-	std::vector< Helpers::AllocatedBuffer > material_params;
-	std::vector<MaterialTextureInfo> material_tex_info;
-	std::vector< Helpers::AllocatedImage > textures;
-	std::vector< VkImageView > texture_views;
-	VkSampler texture_sampler = VK_NULL_HANDLE;
-	VkDescriptorPool material_descriptor_pool = VK_NULL_HANDLE;
-	std::vector< VkDescriptorSet > material_descriptors; //allocated from material_descriptor_pool
 
 	//--------------------------------------------------------------------
 	//Resources that change when the swapchain is resized:
@@ -246,12 +188,6 @@ struct Tutorial : RTG::Application {
 	bool anim_loop = true;
 	float anim_time = 0.0f;
 	float anim_duration = 0.0f;
-
-	std::vector<S72::Node*> all_nodes;
-	std::vector<S72::vec3> rest_T;
-	std::vector<S72::quat> rest_R;
-	std::vector<S72::vec3> rest_S;
-
 
 	//for selecting between cameras:
 	enum class CameraMode {
@@ -288,10 +224,7 @@ struct Tutorial : RTG::Application {
 	//computed from the current camera (as set by camera_mode) during update():
 	mat4 CLIP_FROM_WORLD;
 	mat4 CLIP_FROM_WORLD_FOR_CULLING;
-	std::vector<mat4> camera_view_matrices;
-	std::vector<mat4> camera_proj_matrices;
-	std::vector<float> camera_aspects;
-	std::unordered_map<std::string, uint32_t> camera_indices;
+	
 	uint32_t current_camera_index = 0;
 
 	std::vector< LinesPipeline::Vertex > lines_vertices;
@@ -299,22 +232,6 @@ struct Tutorial : RTG::Application {
 	std::vector< LinesPipeline::Vertex > frustum_lines_vertices;
 	std::vector< LinesPipeline::Vertex > bvh_lines_vertices;
 
-	ObjectsPipeline::World world;
-
-	struct ObjectInstance {
-		ObjectVertices vertices;
-		ObjectsPipeline::Transform transform;
-		uint32_t mesh = 0;
-		uint32_t material = 0;
-	};
-	std::vector< ObjectInstance > object_instances;
-	std::unordered_map<S72::Node*, uint32_t> node_to_instance;
-	std::vector<uint32_t> dynamic_instances;
-	std::unordered_set<S72::Node*> driven_nodes;
-
-	std::vector<uint32_t> bvh_indices;
-	std::vector<BVHNode> bvh_nodes;
-	bool bvh_built = false;
 
 	VkQueryPool timestamp_query_pool = VK_NULL_HANDLE;
 	float timestamp_period = 0.0f;

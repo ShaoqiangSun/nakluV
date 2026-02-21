@@ -9,389 +9,9 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
-#include <fstream>
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 
-static inline bool aabb_outside_plane(Tutorial::AABB const &box, glm::vec4 const &plane) {
-	glm::vec3 n(plane.x, plane.y, plane.z);
+#include "SceneViewer.hpp"
 
-	glm::vec3 v;
-    v.x = (n.x >= 0.0f) ? box.max.x : box.min.x;
-    v.y = (n.y >= 0.0f) ? box.max.y : box.min.y;
-    v.z = (n.z >= 0.0f) ? box.max.z : box.min.z;
-
-	float dist = plane.x * v.x + plane.y * v.y + plane.z * v.z + plane.w;
-    return dist < 0.0f;
-}
-
-
-static inline bool aabb_intersects_frustum(Tutorial::AABB const &box_target_space, glm::mat4 const& transform_matrix) {
-	//Vulkan clip constraints (x,y in [-w,w], z in [0,w]):
-    //left:   x + w >= 0
-    //right: -x + w >= 0
-    //bottom: y + w >= 0
-    //top:   -y + w >= 0
-    //near:  z >= 0
-    //far:  -z + w >= 0
-	const glm::vec4 planes_clip[6] = {
-        glm::vec4( 1,  0,  0, 1), //left
-        glm::vec4(-1,  0,  0, 1), //right
-        glm::vec4( 0,  1,  0, 1), //bottom
-        glm::vec4( 0, -1,  0, 1), //top
-        glm::vec4( 0,  0,  1, 0), //near
-        glm::vec4( 0,  0, -1, 1), //far
-    };
-
-	glm::mat4 transform_matrix_T = glm::transpose(transform_matrix);
-
-	for (uint32_t i = 0; i < 6; ++i) {
-        glm::vec4 plane_target_space = transform_matrix_T * planes_clip[i];
-        if (aabb_outside_plane(box_target_space, plane_target_space)) return false;
-    }
-    return true;
-}
-
-static inline Tutorial::AABB aabb_local_to_world(Tutorial::AABB const& box_local, glm::mat4 const& WORLD_FROM_LOCAL) {
-	glm::vec3 corners[8] = {
-        {box_local.min.x, box_local.min.y, box_local.min.z},
-        {box_local.max.x, box_local.min.y, box_local.min.z},
-        {box_local.min.x, box_local.max.y, box_local.min.z},
-        {box_local.max.x, box_local.max.y, box_local.min.z},
-        {box_local.min.x, box_local.min.y, box_local.max.z},
-        {box_local.max.x, box_local.min.y, box_local.max.z},
-        {box_local.min.x, box_local.max.y, box_local.max.z},
-        {box_local.max.x, box_local.max.y, box_local.max.z},
-    };
-
-	Tutorial::AABB out;
-
-	for (int i = 0; i < 8; ++i) {
-        glm::vec3 p = glm::vec3(WORLD_FROM_LOCAL * glm::vec4(corners[i], 1.0f));
-        out.min = glm::min(out.min, p);
-        out.max = glm::max(out.max, p);
-    }
-    return out;
-}
-
-static inline Tutorial::AABB aabb_merge(Tutorial::AABB const& a, Tutorial::AABB const& b) {
-    Tutorial::AABB out;
-    out.min = glm::min(a.min, b.min);
-    out.max = glm::max(a.max, b.max);
-    return out;
-}
-
-static inline float clamp01(float x) {
-	return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
-}
-
-static inline S72::vec3 read_vec3(std::vector<float> const &v, size_t k) {
-	return S72::vec3(v[3*k+0], v[3*k+1], v[3*k+2]);
-}
-
-static inline S72::quat read_quat_wxyz(std::vector<float> const &v, size_t k) {
-	return S72::quat(v[4*k+3], v[4*k+0], v[4*k+1], v[4*k+2]);
-}
-
-//Reference from https://github.com/15-472/s72-loader print_scene.cpp
-void print_info(S72 &s72){
-	std::cout << "--- Scene Objects ---"<< std::endl;
-	std::cout << "Scene: " << s72.scene.name << std::endl;
-	std::cout << "Roots: ";
-	for (S72::Node* root : s72.scene.roots) {
-		std::cout << root->name << ", ";
-	}
-	std::cout << std::endl;
-
-	std::cout << "Nodes: ";
-	for (auto const& pair : s72.nodes) {
-		std::cout << pair.first << ", ";
-	}
-	std::cout << std::endl;
-
-	std::cout << "Meshes: ";
-	for (auto const& pair : s72.meshes) {
-		std::cout << pair.first << ", ";
-	}
-	std::cout << std::endl;
-
-	std::cout << "Cameras: ";
-	for (auto const& pair : s72.cameras) {
-		std::cout << pair.first << ", ";
-	}
-	std::cout << std::endl;
-
-	 std::cout << "Drivers: ";
-	for (auto const& driver : s72.drivers) {
-		std::cout << driver.name << ", ";
-	}
-	std::cout << std::endl;
-
-	std::cout << "Materials: ";
-	for (auto const& pair : s72.materials) {
-		std::cout << pair.first << ", ";
-	}
-	std::cout << std::endl;
-
-	std::cout << "Environment: ";
-	for (auto const& pair : s72.environments) {
-		std::cout << pair.first << ", ";
-	}
-	std::cout << std::endl;
-
-	std::cout << "Lights: ";
-	for (auto const& pair : s72.lights) {
-		std::cout << pair.first << ", ";
-	}
-	std::cout << std::endl;
-}
-
-//Reference from https://github.com/15-472/s72-loader print_scene.cpp
-void traverse_children(S72 &s72, S72::Node* node, std::string prefix){
-	//Print node information
-	std::cout << prefix << node->name << ": {";
-	if(node->camera != nullptr){
-		std::cout << "Camera: " << node->camera->name;
-	}
-	if(node->mesh != nullptr){
-		std::cout << "Mesh: " << node->mesh->name;
-		if(node->mesh->material != nullptr){
-			std::cout << " {Material: " <<node->mesh->material->name << "}";
-		}
-	}
-	if(node->environment != nullptr){
-		std::cout << "Environment: " << node->environment->name;
-	}
-	if(node->light != nullptr){
-		std::cout << "Light: " << node->light->name;
-	}
-
-	std::cout << "}" <<std::endl;
-
-	std::string new_prefix = prefix + "- ";
-	for(S72::Node* child : node->children){
-		traverse_children(s72, child, new_prefix);
-	}
-}
-//Reference from https://github.com/15-472/s72-loader print_scene.cpp
-void print_scene_graph(S72 &s72){
-	std::cout << std::endl << "--- Scene Graph ---"<< std::endl;
-	for (S72::Node* root : s72.scene.roots) {
-		std::cout << "Root: ";
-		std::string prefix = "";
-		traverse_children(s72, root, prefix);
-	}
-}
-
-void print_mesh_file(S72 &s72){
-	std::cout << std::endl << "--- Mesh File ---"<< std::endl;
-	for (auto pair : s72.meshes) {
-		std::cout << "Mesh: " << pair.first << std::endl;
-		std::cout << "Src: " << pair.second.attributes.at("POSITION").src.src << std::endl;
-		std::cout << "Path: " << pair.second.attributes.at("POSITION").src.path << std::endl;
-	}
-}
-
-void print_data_file(S72 &s72){
-	std::cout << std::endl << "--- Mesh File ---"<< std::endl;
-	for (auto pair : s72.data_files) {
-		std::cout << "Key: " << pair.first << std::endl;
-		std::cout << "Src: " << pair.second.src << std::endl;
-		std::cout << "Path: " << pair.second.path << std::endl;
-	}
-}
-
-static void read_bytes(std::ifstream &f, uint64_t off, void *dst, size_t n) {
-    f.seekg(std::streamoff(off), std::ios::beg);
-    if (!f) throw std::runtime_error("seek failed");
-    f.read(reinterpret_cast<char*>(dst), std::streamsize(n));
-    if (!f) throw std::runtime_error("read failed");
-}
-
-
-void Tutorial::load_mesh_vertices(S72 const &s72, std::vector< PosNorTanTexVertex > &vertices_pool) {
-	for (auto const& [name, mesh] : s72.meshes) {
-		auto const &position = mesh.attributes.at("POSITION");
-		auto const &normal = mesh.attributes.at("NORMAL");
-		auto const &tangent = mesh.attributes.at("TANGENT");
-		auto const &texcoord  = mesh.attributes.at("TEXCOORD");
-
-		ObjectVertices range;
-		range.first = uint32_t(vertices_pool.size());
-		range.count = mesh.count;
-
-		vertices_pool.resize(vertices_pool.size() + mesh.count);
-
-		std::string path = position.src.path;
-		std::ifstream f(path, std::ios::binary);
-		if (!f) throw std::runtime_error("Failed to open " + path);
-
-		AABB aabb; // local-space
-
-		for (uint32_t i = 0; i < mesh.count; ++i) {
-			auto &v = vertices_pool[range.first + i];
-		
-			read_bytes(f, uint64_t(position.offset) + uint64_t(i) * position.stride, &v.Position, sizeof(v.Position));
-			
-			read_bytes(f, uint64_t(normal.offset) + uint64_t(i) * normal.stride, &v.Normal, sizeof(v.Normal));
-	
-			read_bytes(f, uint64_t(tangent.offset) + uint64_t(i) * tangent.stride, &v.Tangent, sizeof(v.Tangent));
-	
-			read_bytes(f, uint64_t(texcoord.offset) + uint64_t(i) * texcoord.stride, &v.TexCoord, sizeof(v.TexCoord));
-
-			glm::vec3 p(v.Position.x, v.Position.y, v.Position.z);
-            aabb.min = glm::min(aabb.min, p);
-            aabb.max = glm::max(aabb.max, p);
-		}
-
-		uint32_t idx = (uint32_t)mesh_aabb_local.size();
-		mesh_id.emplace(name, idx);
-		mesh_vertices.push_back(range);
-		mesh_aabb_local.push_back(aabb);
-		
-	}
-}
-
-void Tutorial::append_bbox_lines_world(AABB const &local, glm::mat4 const &WORLD_FROM_LOCAL, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-	glm::vec3 corners[8] = {
-        {local.min.x, local.min.y, local.min.z},
-        {local.max.x, local.min.y, local.min.z},
-        {local.max.x, local.max.y, local.min.z},
-        {local.min.x, local.max.y, local.min.z},
-        {local.min.x, local.min.y, local.max.z},
-        {local.max.x, local.min.y, local.max.z},
-        {local.max.x, local.max.y, local.max.z},
-        {local.min.x, local.max.y, local.max.z},
-    };
-
-	glm::vec3 p[8];
-	for (int i = 0; i < 8; ++i) {
-        p[i] = WORLD_FROM_LOCAL * glm::vec4(corners[i], 1.0f);
-    }
-
-	auto edge = [&](int idx1, int idx2) { 
-		PosColVertex v1, v2;
-		v1.Position.x = p[idx1].x; v1.Position.y = p[idx1].y; v1.Position.z = p[idx1].z;
-		v1.Color.r = r; v1.Color.g = g; v1.Color.b = b; v1.Color.a = a;
-
-		v2.Position.x = p[idx2].x; v2.Position.y = p[idx2].y; v2.Position.z = p[idx2].z;
-		v2.Color.r = r; v2.Color.g = g; v2.Color.b = b; v2.Color.a = a;
-
-		bbox_lines_vertices.push_back(v1);
-    	bbox_lines_vertices.push_back(v2);
-
-		// lines_vertices.push_back(v1);
-    	// lines_vertices.push_back(v2);
-	};
-
-
-    // bottom
-    edge(0,1); edge(1,2); edge(2,3); edge(3,0);
-    // top
-    edge(4,5); edge(5,6); edge(6,7); edge(7,4);
-    // verticals
-    edge(0,4); edge(1,5); edge(2,6); edge(3,7);
-
-}
-
-void Tutorial::append_frustum_lines_world(glm::mat4 const &CLIP_FROM_WORLD, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-	// glm::mat4 CAMERA_FROM_CLIP = glm::inverse(PROJ);
-	// glm::mat4 WORLD_FROM_CAMERA = glm::inverse(VIEW);
-	glm::mat4 WORLD_FROM_CLIP = glm::inverse(CLIP_FROM_WORLD);
-
-	glm::vec3 ndc[8] = {
-        {-1,-1,0}, {+1,-1,0}, {+1,+1,0}, {-1,+1,0}, // near
-        {-1,-1,1}, {+1,-1,1}, {+1,+1,1}, {-1,+1,1}, // far
-    };
-
-	glm::vec3 p[8];
-	for (int i = 0; i < 8; ++i) {
-		// glm::vec4 ndc_homo(ndc[i], 1.0f);
-
-		// glm::vec4 clip_homo = CAMERA_FROM_CLIP * ndc_homo;
-
-		// glm::vec3 cam = glm::vec3(clip_homo) / clip_homo.w;
-
-		// glm::vec4 world_homo = WORLD_FROM_CAMERA * glm::vec4(cam, 1.0f);
-		// p[i] = glm::vec3(world_homo);
-
-		glm::vec4 ndc_homo(ndc[i], 1.0f);
-		glm::vec4 world = WORLD_FROM_CLIP * ndc_homo;
-        p[i] = glm::vec3(world) / world.w;
-    }
-
-	auto edge = [&](int idx1, int idx2) { 
-		PosColVertex v1, v2;
-		v1.Position.x = p[idx1].x; v1.Position.y = p[idx1].y; v1.Position.z = p[idx1].z;
-		v1.Color.r = r; v1.Color.g = g; v1.Color.b = b; v1.Color.a = a;
-
-		v2.Position.x = p[idx2].x; v2.Position.y = p[idx2].y; v2.Position.z = p[idx2].z;
-		v2.Color.r = r; v2.Color.g = g; v2.Color.b = b; v2.Color.a = a;
-
-		frustum_lines_vertices.push_back(v1);
-    	frustum_lines_vertices.push_back(v2);
-
-		// lines_vertices.push_back(v1);
-    	// lines_vertices.push_back(v2);
-	};
-
-
-    // near
-    edge(0,1); edge(1,2); edge(2,3); edge(3,0);
-    // far
-    edge(4,5); edge(5,6); edge(6,7); edge(7,4);
-   // sides
-    edge(0,4); edge(1,5); edge(2,6); edge(3,7);
-}
-
-void Tutorial::append_bvh_lines_world(AABB const &local, glm::mat4 const &WORLD_FROM_LOCAL, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-	glm::vec3 corners[8] = {
-        {local.min.x, local.min.y, local.min.z},
-        {local.max.x, local.min.y, local.min.z},
-        {local.max.x, local.max.y, local.min.z},
-        {local.min.x, local.max.y, local.min.z},
-        {local.min.x, local.min.y, local.max.z},
-        {local.max.x, local.min.y, local.max.z},
-        {local.max.x, local.max.y, local.max.z},
-        {local.min.x, local.max.y, local.max.z},
-    };
-
-	glm::vec3 p[8];
-	for (int i = 0; i < 8; ++i) {
-        p[i] = WORLD_FROM_LOCAL * glm::vec4(corners[i], 1.0f);
-    }
-
-	auto edge = [&](int idx1, int idx2) { 
-		PosColVertex v1, v2;
-		v1.Position.x = p[idx1].x; v1.Position.y = p[idx1].y; v1.Position.z = p[idx1].z;
-		v1.Color.r = r; v1.Color.g = g; v1.Color.b = b; v1.Color.a = a;
-
-		v2.Position.x = p[idx2].x; v2.Position.y = p[idx2].y; v2.Position.z = p[idx2].z;
-		v2.Color.r = r; v2.Color.g = g; v2.Color.b = b; v2.Color.a = a;
-
-		bvh_lines_vertices.push_back(v1);
-    	bvh_lines_vertices.push_back(v2);
-
-		// lines_vertices.push_back(v1);
-    	// lines_vertices.push_back(v2);
-	};
-
-
-    // bottom
-    edge(0,1); edge(1,2); edge(2,3); edge(3,0);
-    // top
-    edge(4,5); edge(5,6); edge(6,7); edge(7,4);
-    // verticals
-    edge(0,4); edge(1,5); edge(2,6); edge(3,7);
-
-}
-
-static inline mat4 to_mat4(glm::mat4 const& m) {
-    mat4 out;
-    static_assert(sizeof(out) == sizeof(glm::mat4), "sizes must match");
-    std::memcpy(out.data(), &m[0][0], sizeof(mat4));
-    return out;
-}
 
 static inline glm::mat4 to_glm(mat4 const& m) {
     glm::mat4 out;
@@ -400,390 +20,6 @@ static inline glm::mat4 to_glm(mat4 const& m) {
     return out;
 }
 
-void Tutorial::traverse_node(S72::Node* node, glm::mat4 const& parent, bool inherited_dynamic) {
-	bool dynamic_here = inherited_dynamic || (driven_nodes.count(node) != 0);
-
-	glm::mat4 local =
-		glm::translate(glm::mat4(1.0f), node->translation) *
-		glm::mat4_cast(node->rotation) *
-		glm::scale(glm::mat4(1.0f), node->scale);
-
-	glm::mat4 world_glm = parent * local; 
-	glm::mat3 world_normal3 = glm::transpose(glm::inverse(glm::mat3(world_glm)));
-	glm::mat4 world_normal4(1.0f);
-	world_normal4[0] = glm::vec4(world_normal3[0], 0.0f);
-	world_normal4[1] = glm::vec4(world_normal3[1], 0.0f);
-	world_normal4[2] = glm::vec4(world_normal3[2], 0.0f);
-
-	mat4 world_matrix = to_mat4(world_glm);
-	mat4 world_matrix_normal = to_mat4(world_normal4);
-
-	if (node->mesh != nullptr) {
-		uint32_t mesh_idx = mesh_id.at(node->mesh->name);
-		ObjectVertices vertices = mesh_vertices[mesh_idx];
-		AABB local = mesh_aabb_local[mesh_idx];
-
-		append_bbox_lines_world(local, world_glm, 255, 0, 0, 255); // red
-
-		uint32_t inst_idx = uint32_t(object_instances.size());
-
-		object_instances.emplace_back(ObjectInstance{
-			.vertices = vertices,
-			.transform{
-				//.CLIP_FROM_LOCAL = CLIP_FROM_WORLD * world_matrix,
-				.WORLD_FROM_LOCAL = world_matrix,
-				.WORLD_FROM_LOCAL_NORMAL = world_matrix_normal,
-			},
-			.mesh = mesh_idx,
-			.material = node->mesh->material != nullptr ? material_id.at(node->mesh->material) : 0,
-		});
-
-		node_to_instance[node] = inst_idx;
-
-		if (dynamic_here) dynamic_instances.push_back(inst_idx);
-        else bvh_indices.push_back(inst_idx);
-	}
-
-	if (node->light != nullptr) {
-		if (std::holds_alternative<S72::Light::Sun>(node->light->source)) {
-			auto const& sun = std::get<S72::Light::Sun>(node->light->source);
-
-			glm::vec3 light_dir = -glm::normalize(glm::vec3(world_glm * glm::vec4(0,0,-1,0)));
-			if (sun.angle < 1e-4f) {
-				world.SUN_DIRECTION.x = light_dir.x;
-				world.SUN_DIRECTION.y = light_dir.y;
-				world.SUN_DIRECTION.z = light_dir.z;
-				world.SUN_ENERGY.r = node->light->tint.r * sun.strength;
-				world.SUN_ENERGY.g = node->light->tint.g * sun.strength;
-				world.SUN_ENERGY.b = node->light->tint.b * sun.strength;
-				// world.SUN_ENERGY.r = 0.0f;
-				// world.SUN_ENERGY.g = 0.0f;
-				// world.SUN_ENERGY.b = 0.0f;
-			}
-			if (sun.angle > 3.14f) {
-				world.SKY_DIRECTION.x = light_dir.x;
-				world.SKY_DIRECTION.y = light_dir.y;
-				world.SKY_DIRECTION.z = light_dir.z;
-				world.SKY_ENERGY.r = node->light->tint.r * sun.strength;
-				world.SKY_ENERGY.g = node->light->tint.g * sun.strength;
-				world.SKY_ENERGY.b = node->light->tint.b * sun.strength;
-				// world.SKY_ENERGY.r = 0.0f;
-				// world.SKY_ENERGY.g = 0.0f;
-				// world.SKY_ENERGY.b = 0.0f;
-			}
-		}
-	}
-
-	if (node->camera != nullptr) {
-		auto const& cam = *node->camera;
-
-		mat4 view = to_mat4(glm::inverse(world_glm));
-
-		auto const& persp = std::get<S72::Camera::Perspective>(cam.projection);
-
-		mat4 proj = perspective(
-			persp.vfov,
-			persp.aspect,
-			persp.near,
-			persp.far
-		);
-
-		camera_indices[cam.name] = uint32_t(camera_view_matrices.size());
-
-		camera_view_matrices.push_back(view);
-		camera_proj_matrices.push_back(proj);
-		camera_aspects.push_back(persp.aspect);
-
-	}
-
-	for (S72::Node* child : node->children) {
-		traverse_node(child, world_glm, dynamic_here);
-	}
-
-}
-
-void Tutorial::update_transforms_node(S72::Node* node, glm::mat4 const& parent) {
-	glm::mat4 local =
-		glm::translate(glm::mat4(1.0f), node->translation) *
-		glm::mat4_cast(node->rotation) *
-		glm::scale(glm::mat4(1.0f), node->scale);
-
-	glm::mat4 world_glm = parent * local; 
-	glm::mat3 world_normal3 = glm::transpose(glm::inverse(glm::mat3(world_glm)));
-	glm::mat4 world_normal4(1.0f);
-	world_normal4[0] = glm::vec4(world_normal3[0], 0.0f);
-	world_normal4[1] = glm::vec4(world_normal3[1], 0.0f);
-	world_normal4[2] = glm::vec4(world_normal3[2], 0.0f);
-
-	mat4 world_matrix = to_mat4(world_glm);
-	mat4 world_matrix_normal = to_mat4(world_normal4);
-
-	if (node->mesh != nullptr) {
-		uint32_t mesh_idx = mesh_id.at(node->mesh->name);
-		AABB local = mesh_aabb_local[mesh_idx];
-
-		append_bbox_lines_world(local, world_glm, 255, 0, 0, 255); // red
-
-		uint32_t inst_idx = node_to_instance.at(node);
-		//object_instances[inst_idx].CLIP_FROM_LOCAL = CLIP_FROM_WORLD * world_matrix;
-		object_instances[inst_idx].transform.WORLD_FROM_LOCAL = world_matrix;
-		object_instances[inst_idx].transform.WORLD_FROM_LOCAL_NORMAL = world_matrix_normal;
-	}
-
-	if (node->camera != nullptr) {
-		auto const& cam = *node->camera;
-
-		mat4 view = to_mat4(glm::inverse(world_glm));
-
-		uint32_t camera_idx = camera_indices[cam.name];
-
-		camera_view_matrices[camera_idx] = view;
-	}
-
-	for (S72::Node* child : node->children) {
-		update_transforms_node(child, world_glm);
-	}
-
-}
-
-void Tutorial::build_scene_objects() {
-	object_instances.clear();
-
-	glm::mat4 parent(1.0f);
-
-	mark_driven_nodes();
-
-	for (S72::Node* root: s72.scene.roots) {
-		traverse_node(root, parent, false);
-	}
-
-	build_bvh_for_static();
-}
-
-void Tutorial::update_scene_objects() {
-	bbox_lines_vertices.clear();
-
-	glm::mat4 parent(1.0f);
-
-	for (S72::Node* root: s72.scene.roots) {
-		update_transforms_node(root, parent);
-	}
-}
-
-void Tutorial::update_object_instances_camera() {
-	for (auto & obj_inst : object_instances) {
-		obj_inst.transform.CLIP_FROM_LOCAL = CLIP_FROM_WORLD * obj_inst.transform.WORLD_FROM_LOCAL;
-	}
-}
-
-void Tutorial::build_material_texture() {
-	materials_list.clear();
-	materials_list.reserve(s72.materials.size());
-	textures_list.clear();
-	textures_list.reserve(s72.textures.size());
-
-	for (auto const& [name, mat] : s72.materials) {
-		materials_list.push_back(&mat);
-	}
-
-	for (auto const& [src, tex] : s72.textures) {
-		textures_list.push_back(&tex);
-	}
-
-	std::sort(materials_list.begin(), materials_list.end(),
-			[](auto a, auto b){ return a->name < b->name; });
-	std::sort(textures_list.begin(), textures_list.end(),
-		[](auto a, auto b){
-			if (a->src != b->src) return a->src < b->src;
-			if (a->type != b->type) return int(a->type) < int(b->type);
-			return int(a->format) < int(b->format);
-		});
-
-
-	material_id.clear();
-	for (uint32_t i = 0; i < (uint32_t)materials_list.size(); ++i) {
-		//default material has index 0
-		material_id[materials_list[i]] = i + 1;
-	}
-	texture_id.clear();
-	for (uint32_t i = 0; i < (uint32_t)textures_list.size(); ++i) {
-		//default texture has index 0
-		texture_id[textures_list[i]] = i + 1;
-	}
-
-	//default material has index 0
-	material_params.push_back(rtg.helpers.create_buffer(
-			sizeof(ObjectsPipeline::Material), 
-			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			Helpers::Mapped
-	));
-
-	S72::color c{0.8f, 0.8f, 0.8f};
-	std::memcpy(material_params[0].allocation.data(), &c, sizeof(c));
-
-	material_tex_info.emplace_back(MaterialTextureInfo{0, 0});
-
-	for (uint32_t i = 0; i < (uint32_t)materials_list.size(); ++i) {
-		S72::Material const* mat = materials_list[i];
-
-		material_params.push_back(rtg.helpers.create_buffer(
-			sizeof(ObjectsPipeline::Material), 
-			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			Helpers::Mapped
-		));
-
-		MaterialTextureInfo info{};
-
-		if (std::holds_alternative<S72::Material::Lambertian>(mat->brdf)) {
-			auto const& lam = std::get<S72::Material::Lambertian>(mat->brdf);
-			if (std::holds_alternative<S72::color>(lam.albedo)) {
-				auto const& c = std::get<S72::color>(lam.albedo);
-				//default material has index 0
-				std::memcpy(material_params[i + 1].allocation.data(), &c, sizeof(c));
-			} 
-			else {
-				auto const* tex = std::get<S72::Texture*>(lam.albedo);
-				info.albedo_tex_index = texture_id.at(tex);
-				info.has_albedo_tex = 1;
-
-				S72::color c{1.0f, 1.0f, 1.0f};
-				//default material has index 0
-				std::memcpy(material_params[i + 1].allocation.data(), &c, sizeof(c));
-			}
-		}
-
-		material_tex_info.push_back(info);
-
-		
-	}
-
-}
-
-void Tutorial::load_all_textures() {
-	// textures.clear();
-    // textures.reserve(textures_list.size());
-
-	stbi_set_flip_vertically_on_load(true);
-    
-    for (size_t i = 0; i < textures_list.size(); ++i) {
-        S72::Texture const* tex = textures_list[i];
-
-        int w=0, h=0, comp=0;
-        stbi_uc* pixels = stbi_load(tex->path.c_str(), &w, &h, &comp, 4);
-        if (!pixels) throw std::runtime_error(std::string("stbi_load failed: ") + tex->path);
-
-        std::vector<uint32_t> data;
-        data.resize(size_t(w) * size_t(h));
-        std::memcpy(data.data(), pixels, data.size() * sizeof(uint32_t));
-        stbi_image_free(pixels);
-
-        VkFormat fmt = (tex->format == S72::Texture::Format::srgb)
-            ? VK_FORMAT_R8G8B8A8_SRGB
-            : VK_FORMAT_R8G8B8A8_UNORM;
-
-        textures.emplace_back(rtg.helpers.create_image(
-            VkExtent2D{ (uint32_t)w, (uint32_t)h },
-            fmt,
-            VK_IMAGE_TILING_OPTIMAL,
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            Helpers::Unmapped
-        ));
-
-        rtg.helpers.transfer_to_image(data.data(), data.size() * sizeof(uint32_t), textures.back());
-
-    }
-}
-
-void Tutorial::cache_rest_pose_and_duration() {
-	all_nodes.clear();
-	rest_T.clear();
-	rest_R.clear();
-	rest_S.clear();
-	
-	all_nodes.reserve(s72.nodes.size());
-	rest_T.reserve(s72.nodes.size());
-	rest_R.reserve(s72.nodes.size());
-	rest_S.reserve(s72.nodes.size());
-
-	for (auto &pair : s72.nodes) {
-		S72::Node *n = &pair.second;
-		all_nodes.push_back(n);
-		rest_T.push_back(n->translation);
-		rest_R.push_back(n->rotation);
-		rest_S.push_back(n->scale);
-	}
-
-	anim_duration = 0.0f;
-	for (auto const &d : s72.drivers) {
-		if (!d.times.empty()) anim_duration = std::max(anim_duration, d.times.back());
-	}
-}
-
-void Tutorial::apply_drivers(float t) {
-	//reset to rest pose:
-	for (size_t i = 0; i < all_nodes.size(); ++i) {
-		all_nodes[i]->translation = rest_T[i];
-		all_nodes[i]->rotation    = rest_R[i];
-		all_nodes[i]->scale       = rest_S[i];
-	}
-
-	for (auto const &d : s72.drivers) {
-		auto const &times = d.times;
-		if (times.empty()) continue;
-
-		if (t <= times.front()) {
-			size_t k = 0;
-			if (d.channel == S72::Driver::Channel::translation) d.node.translation = read_vec3(d.values, k);
-			else if (d.channel == S72::Driver::Channel::scale) d.node.scale = read_vec3(d.values, k);
-			else if (d.channel == S72::Driver::Channel::rotation) d.node.rotation = glm::normalize(read_quat_wxyz(d.values, k));
-			continue;
-		}
-
-		if (t >= times.back()) {
-			size_t k = times.size() - 1;
-			if (d.channel == S72::Driver::Channel::translation) d.node.translation = read_vec3(d.values, k);
-			else if (d.channel == S72::Driver::Channel::scale) d.node.scale = read_vec3(d.values, k);
-			else if (d.channel == S72::Driver::Channel::rotation) d.node.rotation = glm::normalize(read_quat_wxyz(d.values, k));
-			continue;
-		}
-
-		auto it = std::upper_bound(times.begin(), times.end(), t);
-		size_t i = size_t(it - times.begin()) - 1;
-		size_t j = i + 1;
-
-		float t0 = times[i], t1 = times[j];
-		float u = (t1 > t0) ? (t - t0) / (t1 - t0) : 0.0f;
-		u = clamp01(u);
-
-		if (d.interpolation == S72::Driver::Interpolation::STEP) u = 0.0f;
-
-		if (d.channel == S72::Driver::Channel::translation) {
-			S72::vec3 a = read_vec3(d.values, i);
-			S72::vec3 b = read_vec3(d.values, j);
-			d.node.translation = (1.0f - u) * a + u * b;
-		} 
-		else if (d.channel == S72::Driver::Channel::scale) {
-			S72::vec3 a = read_vec3(d.values, i);
-			S72::vec3 b = read_vec3(d.values, j);
-			d.node.scale = (1.0f - u) * a + u * b;
-		} 
-		else if (d.channel == S72::Driver::Channel::rotation) {
-			S72::quat qa = glm::normalize(read_quat_wxyz(d.values, i));
-			S72::quat qb = glm::normalize(read_quat_wxyz(d.values, j));
-
-			if (d.interpolation == S72::Driver::Interpolation::SLERP) {
-				d.node.rotation = glm::slerp(qa, qb, u);
-			} else {
-				d.node.rotation = glm::normalize(glm::mix(qa, qb, u));
-			}
-		}
-		
-	}
-
-}
 
 static S72 build_cpu_bottleneck_scene(std::string const& base_s72_file, std::string const& mesh_name, uint32_t N_culled) {
 	S72 s72 = S72::load(base_s72_file);
@@ -813,130 +49,29 @@ static S72 build_cpu_bottleneck_scene(std::string const& base_s72_file, std::str
 	return s72;
 }
 
-void Tutorial::mark_driven_nodes() {
-    driven_nodes.clear();
-    for (auto const &d : s72.drivers) {
-        driven_nodes.insert(&d.node);
-    }
-}
 
-int Tutorial::build_bvh(std::vector<std::pair<AABB,uint32_t>> &items, int start, int count) {
-	BVHNode node;
-
-	AABB box;
-
-	for (uint32_t i = 0; i < count; ++i) box = aabb_merge(box, items[start + i].first);
-    node.box_world = box;
-
-	int node_idx = int(bvh_nodes.size());
-    bvh_nodes.push_back(node);
-
-	if (count <= 4) {
-        //write leaf range into bvh_indices
-        uint32_t leaf_start = uint32_t(bvh_indices.size());
-        for (int i = 0; i < count; ++i) bvh_indices.push_back(items[start + i].second);
-
-        bvh_nodes[node_idx].start = leaf_start;
-        bvh_nodes[node_idx].count = uint32_t(count);
-        return node_idx;
-    }
-
-	glm::vec3 ext = box.max - box.min;
-    int axis = (ext.y > ext.x) ? 1 : 0;
-    if (ext.z > ext[axis]) axis = 2;
-
-    auto centroid = [&](AABB const& b)->float {
-        return 0.5f*(b.min[axis] + b.max[axis]);
-    };
-
-	int mid = start + count / 2;
-    std::nth_element(
-        items.begin() + start,
-        items.begin() + mid,
-        items.begin() + start + count,
-        [&](auto const& A, auto const& B){ return centroid(A.first) < centroid(B.first); }
-    );
-
-	int left = build_bvh(items, start, mid - start);
-    int right = build_bvh(items, mid, start + count - mid);
-
-	bvh_nodes[node_idx].left = left;
-    bvh_nodes[node_idx].right = right;
-    bvh_nodes[node_idx].count = 0;
-    return node_idx;
-}
-
-void Tutorial::build_bvh_for_static() {
-	std::vector<uint32_t> static_in = bvh_indices;
-    bvh_indices.clear();
-    bvh_nodes.clear();
-
-	if (static_in.empty()) return;
-
-    std::vector<std::pair<AABB,uint32_t>> items;
-    items.reserve(static_in.size());
-
-	for (uint32_t inst_idx : static_in) {
-        ObjectInstance const& inst = object_instances[inst_idx];
-        AABB const& box_local = mesh_aabb_local.at(inst.mesh);
-        glm::mat4 W = to_glm(inst.transform.WORLD_FROM_LOCAL);
-        AABB box_world = aabb_local_to_world(box_local, W);
-        items.emplace_back(box_world, inst_idx);
-    }
-
-	build_bvh(items, 0, int(items.size()));
-}
-
-void Tutorial::cull_with_bvh(glm::mat4 const& CLIP_FROM_WORLD_CULL_glm, std::vector<uint32_t> &draw_list){
-	if (bvh_nodes.empty()) return;
-
-    std::vector<int> stack;
-    stack.reserve(bvh_nodes.size());
-    stack.push_back(0);
-
-	while (!stack.empty()) {
-		int node_idx = stack.back();
-        stack.pop_back();
-		BVHNode const &node = bvh_nodes[node_idx];
-		if (!aabb_intersects_frustum(node.box_world, CLIP_FROM_WORLD_CULL_glm)) continue;
-
-		if (node.count > 0) {
-			for (uint32_t k = 0; k < node.count; ++k) {
-				uint32_t inst_idx = bvh_indices[node.start + k];
-
-				ObjectInstance const &inst = object_instances[inst_idx];
-				AABB const &box_local = mesh_aabb_local.at(inst.mesh);
-				glm::mat4 W = to_glm(inst.transform.WORLD_FROM_LOCAL);
-                glm::mat4 CLIP_FROM_LOCAL_glm = CLIP_FROM_WORLD_CULL_glm * W;
-				if (aabb_intersects_frustum(box_local, CLIP_FROM_LOCAL_glm)) {
-					// append_bvh_lines_world(box_local, W, 255, 255, 255);
-                    draw_list.push_back(inst_idx);
-                }
-			}
-		} else {
-            if (node.left >= 0) stack.push_back(node.left);
-            if (node.right >= 0) stack.push_back(node.right);
-        }
-	}
-}
+Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 
 
-Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
-	//load .s72 scene:
+	scene_viewer = std::make_unique<SceneViewer>(material_system);
+	
 	try {
 		if (!rtg.configuration.test_mode.empty()) {
 			
 			if (rtg.configuration.test_mode == "cpu") {
 				uint32_t N_culled = std::stoul(rtg.configuration.cpu_test_culled_count);
-				s72 = build_cpu_bottleneck_scene("scenes/cpu-bottleneck.s72", "Rounded-Cube" ,N_culled);
+				scene_viewer->s72 = build_cpu_bottleneck_scene("scenes/cpu-bottleneck.s72", "Rounded-Cube" ,N_culled);
 				
 			}
 			else {
-				if (!rtg.configuration.scene_file.empty()) s72 = S72::load(rtg.configuration.scene_file);
+				if (!rtg.configuration.scene_file.empty()) scene_viewer->s72 = S72::load(rtg.configuration.scene_file);
 			}
+
+			material_system.build_material_texture(scene_viewer->s72);
+			material_system.load_all_textures();
 			
 			if (!rtg.configuration.camera_name.empty()) {
-				if (s72.cameras.count(rtg.configuration.camera_name) == 0) {
+				if (scene_viewer->s72.cameras.count(rtg.configuration.camera_name) == 0) {
 					throw std::runtime_error(
 						"Camera '" + rtg.configuration.camera_name + "' not found in scene."
 					);
@@ -965,14 +100,13 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 			perf_log << "frame,instances,visible,cpu_cull_ms,cpu_frame_ms,cpu_wait_gpu_ms,gpu_draw_ms\n";
 		}
 		else if (!rtg.configuration.scene_file.empty()) {
-			s72 = S72::load(rtg.configuration.scene_file);
-			// print_info(s72);
-			// print_scene_graph(s72);
-			// print_mesh_file(s72);
-			// print_data_file(s72);
+			scene_viewer->s72 = S72::load(rtg.configuration.scene_file);
+			
+			material_system.build_material_texture(scene_viewer->s72);
+			material_system.load_all_textures();
 
 			if (!rtg.configuration.camera_name.empty()) {
-				if (s72.cameras.count(rtg.configuration.camera_name) == 0) {
+				if (scene_viewer->s72.cameras.count(rtg.configuration.camera_name) == 0) {
 					throw std::runtime_error(
 						"Camera '" + rtg.configuration.camera_name + "' not found in scene."
 					);
@@ -1256,163 +390,8 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 	{ //create object vertices
 		// std::vector< PosNorTexVertex > vertices;
 		std::vector< PosNorTanTexVertex > vertices;
-		load_mesh_vertices(s72, vertices);
+		scene_viewer->load_mesh_vertices(vertices);
 		
-		// { //A [-1,1]x[-1,1]x{0} quadrilateral:
-		// 	plane_vertices.first = uint32_t(vertices.size());
-		// 	// vertices.emplace_back(PosNorTexVertex{
-		// 	// 	.Position{ .x = -1.0f, .y = -1.0f, .z = 0.0f },
-		// 	// 	.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f },
-		// 	// 	.TexCoord{ .s = 0.0f, .t = 0.0f },
-		// 	// });
-		// 	// vertices.emplace_back(PosNorTexVertex{
-		// 	// 	.Position{ .x = 1.0f, .y = -1.0f, .z = 0.0f },
-		// 	// 	.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f },
-		// 	// 	.TexCoord{ .s = 1.0f, .t = 0.0f },
-		// 	// });
-		// 	// vertices.emplace_back(PosNorTexVertex{
-		// 	// 	.Position{ .x = -1.0f, .y = 1.0f, .z = 0.0f },
-		// 	// 	.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f },
-		// 	// 	.TexCoord{ .s = 0.0f, .t = 1.0f },
-		// 	// });
-		// 	// vertices.emplace_back(PosNorTexVertex{
-		// 	// 	.Position{ .x = 1.0f, .y = 1.0f, .z = 0.0f },
-		// 	// 	.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f },
-		// 	// 	.TexCoord{ .s = 1.0f, .t = 1.0f },
-		// 	// });
-		// 	// vertices.emplace_back(PosNorTexVertex{
-		// 	// 	.Position{ .x = -1.0f, .y = 1.0f, .z = 0.0f },
-		// 	// 	.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f},
-		// 	// 	.TexCoord{ .s = 0.0f, .t = 1.0f },
-		// 	// });
-		// 	// vertices.emplace_back(PosNorTexVertex{
-		// 	// 	.Position{ .x = 1.0f, .y = -1.0f, .z = 0.0f },
-		// 	// 	.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f},
-		// 	// 	.TexCoord{ .s = 1.0f, .t = 0.0f },
-		// 	// });
-
-
-		// 	vertices.emplace_back(PosNorTanTexVertex{
-		// 		.Position{ .x = -1.0f, .y = -1.0f, .z = 0.0f },
-		// 		.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f },
-		// 		.Tangent{ .x = 0.0f, .y = 0.0f, .z = 0.0f, .w = 0.0f },
-		// 		.TexCoord{ .s = 0.0f, .t = 0.0f },
-		// 	});
-		// 	vertices.emplace_back(PosNorTanTexVertex{
-		// 		.Position{ .x = 1.0f, .y = -1.0f, .z = 0.0f },
-		// 		.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f },
-		// 		.Tangent{ .x = 0.0f, .y = 0.0f, .z = 0.0f, .w = 0.0f },
-		// 		.TexCoord{ .s = 1.0f, .t = 0.0f },
-		// 	});
-		// 	vertices.emplace_back(PosNorTanTexVertex{
-		// 		.Position{ .x = -1.0f, .y = 1.0f, .z = 0.0f },
-		// 		.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f },
-		// 		.Tangent{ .x = 0.0f, .y = 0.0f, .z = 0.0f, .w = 0.0f },
-		// 		.TexCoord{ .s = 0.0f, .t = 1.0f },
-		// 	});
-		// 	vertices.emplace_back(PosNorTanTexVertex{
-		// 		.Position{ .x = 1.0f, .y = 1.0f, .z = 0.0f },
-		// 		.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f },
-		// 		.Tangent{ .x = 0.0f, .y = 0.0f, .z = 0.0f, .w = 0.0f },
-		// 		.TexCoord{ .s = 1.0f, .t = 1.0f },
-		// 	});
-		// 	vertices.emplace_back(PosNorTanTexVertex{
-		// 		.Position{ .x = -1.0f, .y = 1.0f, .z = 0.0f },
-		// 		.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f},
-		// 		.Tangent{ .x = 0.0f, .y = 0.0f, .z = 0.0f, .w = 0.0f },
-		// 		.TexCoord{ .s = 0.0f, .t = 1.0f },
-		// 	});
-		// 	vertices.emplace_back(PosNorTanTexVertex{
-		// 		.Position{ .x = 1.0f, .y = -1.0f, .z = 0.0f },
-		// 		.Normal{ .x = 0.0f, .y = 0.0f, .z = 1.0f},
-		// 		.Tangent{ .x = 0.0f, .y = 0.0f, .z = 0.0f, .w = 0.0f },
-		// 		.TexCoord{ .s = 1.0f, .t = 0.0f },
-		// 	});
-			
-		// 	plane_vertices.count = uint32_t(vertices.size()) - plane_vertices.first;
-		// }
-		
-		// { //A torus:
-		// 	torus_vertices.first = uint32_t(vertices.size());
-
-		// 	//TODO: torus!
-		// 	//will parameterize with (u,v) where:
-		// 	// - u is angle around main axis (+z)
-		// 	// - v is angle around the tube
-
-		// 	constexpr float R1 = 0.75f; //main radius
-		// 	constexpr float R2 = 0.15f; //tube radius
-
-		// 	constexpr uint32_t U_STEPS = 20;
-		// 	constexpr uint32_t V_STEPS = 16;
-
-		// 	//texture repeats around the torus:
-		// 	constexpr float V_REPEATS = 2.0f;
-		// 	constexpr float U_REPEATS = int(V_REPEATS / R2 * R1 + 0.999f); //approximately square, rounded up
-
-		// 	auto emplace_vertex = [&](uint32_t ui, uint32_t vi) {
-		// 		//convert steps to angles:
-		// 		// (doing the mod since trig on 2 M_PI may not exactly match 0)
-		// 		float ua = (ui % U_STEPS) / float(U_STEPS) * 2.0f * float(M_PI);
-		// 		float va = (vi % V_STEPS) / float(V_STEPS) * 2.0f * float(M_PI);
-
-		// 		// vertices.emplace_back( PosNorTexVertex{
-		// 		// 	.Position{
-		// 		// 		.x = (R1 + R2 * std::cos(va)) * std::cos(ua),
-		// 		// 		.y = (R1 + R2 * std::cos(va)) * std::sin(ua),
-		// 		// 		.z = R2 * std::sin(va),
-		// 		// 	},
-		// 		// 	.Normal{
-		// 		// 		.x = std::cos(va) * std::cos(ua),
-		// 		// 		.y = std::cos(va) * std::sin(ua),
-		// 		// 		.z = std::sin(va),
-		// 		// 	},
-		// 		// 	.TexCoord{
-		// 		// 		.s = ui / float(U_STEPS) * U_REPEATS,
-		// 		// 		.t = vi / float(V_STEPS) * V_REPEATS,
-		// 		// 	},
-		// 		// });
-
-		// 		vertices.emplace_back( PosNorTanTexVertex{
-		// 			.Position{
-		// 				.x = (R1 + R2 * std::cos(va)) * std::cos(ua),
-		// 				.y = (R1 + R2 * std::cos(va)) * std::sin(ua),
-		// 				.z = R2 * std::sin(va),
-		// 			},
-		// 			.Normal{
-		// 				.x = std::cos(va) * std::cos(ua),
-		// 				.y = std::cos(va) * std::sin(ua),
-		// 				.z = std::sin(va),
-		// 			},
-		// 			.Tangent{
-		// 				.x = 0.0f,
-		// 				.y = 0.0f,
-		// 				.z = 0.0f,
-		// 				.w = 0.0f,
-		// 			},
-		// 			.TexCoord{
-		// 				.s = ui / float(U_STEPS) * U_REPEATS,
-		// 				.t = vi / float(V_STEPS) * V_REPEATS,
-		// 			},
-		// 		});
-		// 	};
-
-		// 	for (uint32_t ui = 0; ui < U_STEPS; ++ui) {
-		// 		for (uint32_t vi = 0; vi < V_STEPS; ++vi) {
-		// 			emplace_vertex(ui, vi);
-		// 			emplace_vertex(ui+1, vi);
-		// 			emplace_vertex(ui, vi+1);
-
-		// 			emplace_vertex(ui, vi+1);
-		// 			emplace_vertex(ui+1, vi);
-		// 			emplace_vertex(ui+1, vi+1);
-		// 		}
-		// 	}
-
-		// 	torus_vertices.count = uint32_t(vertices.size()) - torus_vertices.first;
-		// }
-		
-
 		size_t bytes = vertices.size() * sizeof(vertices[0]);
 
 		object_vertices = rtg.helpers.create_buffer(bytes, 
@@ -1425,18 +404,18 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 		rtg.helpers.transfer_to_buffer(vertices.data(), bytes, object_vertices);
 	}
 
-	build_material_texture();
-	build_scene_objects();
-	cache_rest_pose_and_duration();
+	// build_material_texture();
+	scene_viewer->build_scene_objects();
+	scene_viewer->cache_rest_pose_and_duration(anim_duration);
 
 	{ //initialization
-		auto it = camera_indices.find(rtg.configuration.camera_name);
-		if (it != camera_indices.end()) {
+		auto it = scene_viewer->camera_indices.find(rtg.configuration.camera_name);
+		if (it != scene_viewer->camera_indices.end()) {
 			current_camera_index = it->second;
 		}
 		
 		lines_vertices.clear();
-		for (auto & v : bbox_lines_vertices) {
+		for (auto & v : scene_viewer->bbox_lines_vertices) {
 			lines_vertices.push_back(v);
 		}
 
@@ -1444,106 +423,10 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 		debug_camera.far = 10000.0f;
 	}
 
-	{ //make some textures
-		// textures.reserve(2);
-
-		// { //texture 0 will be a dark grey / light grey checkerboard with a red square at the origin.
-		// 	//actually make the texture:
-		// 	uint32_t size = 128;
-		// 	std::vector< uint32_t > data;
-		// 	data.reserve(size * size);
-		// 	for (uint32_t y = 0; y < size; ++y) {
-		// 		float fy = (y + 0.5f) / float(size);
-		// 		for (uint32_t x = 0; x < size; ++x) {
-		// 			float fx = (x + 0.5f) / float(size);
-		// 			//highlight the origin:
-		// 			if      (fx < 0.05f && fy < 0.05f) data.emplace_back(0xff0000ff); //red
-		// 			else if ( (fx < 0.5f) == (fy < 0.5f)) data.emplace_back(0xff444444); //dark grey
-		// 			else data.emplace_back(0xffbbbbbb); //light grey
-		// 		}
-		// 	}
-		// 	assert(data.size() == size*size);
-
-		// 	//make a place for the texture to live on the GPU:
-		// 	textures.emplace_back(rtg.helpers.create_image(
-		// 		VkExtent2D{ .width = size , .height = size }, //size of image
-		// 		VK_FORMAT_R8G8B8A8_UNORM, //how to interpret image data (in this case, linearly-encoded 8-bit RGBA)
-		// 		VK_IMAGE_TILING_OPTIMAL,
-		// 		VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, //will sample and upload
-		// 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, //should be device-local
-		// 		Helpers::Unmapped
-		// 	));
-
-		// 	//transfer data:
-		// 	rtg.helpers.transfer_to_image(data.data(), sizeof(data[0]) * data.size(), textures.back());
-		// }
-
-		// { //texture 1 will be a classic 'xor' texture:
-		// 	//actually make the texture:
-		// 	uint32_t size = 256;
-		// 	std::vector< uint32_t > data;
-		// 	data.reserve(size * size);
-		// 	for (uint32_t y = 0; y < size; ++y) {
-		// 		for (uint32_t x = 0; x < size; ++x) {
-		// 			uint8_t r = uint8_t(x) ^ uint8_t(y);
-		// 			uint8_t g = uint8_t(x + 128) ^ uint8_t(y);
-		// 			uint8_t b = uint8_t(x) ^ uint8_t(y + 27);
-		// 			uint8_t a = 0xff;
-		// 			data.emplace_back( uint32_t(r) | (uint32_t(g) << 8) | (uint32_t(b) << 16) | (uint32_t(a) << 24) );
-		// 		}
-		// 	}
-		// 	assert(data.size() == size*size);
-
-		// 	//make a place for the texture to live on the GPU:
-		// 	textures.emplace_back(rtg.helpers.create_image(
-		// 		VkExtent2D{ .width = size , .height = size }, //size of image
-		// 		VK_FORMAT_R8G8B8A8_SRGB, //how to interpret image data (in this case, SRGB-encoded 8-bit RGBA)
-		// 		VK_IMAGE_TILING_OPTIMAL,
-		// 		VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, //will sample and upload
-		// 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, //should be device-local
-		// 		Helpers::Unmapped
-		// 	));
-
-		// 	//transfer data:
-		// 	rtg.helpers.transfer_to_image(data.data(), sizeof(data[0]) * data.size(), textures.back());
-		// }
-
-		{ //the default first texture will be a white texture.
-			//actually make the texture:
-			uint32_t size = 128;
-			std::vector< uint32_t > data;
-			data.reserve(size * size);
-			for (uint32_t y = 0; y < size; ++y) {
-				for (uint32_t x = 0; x < size; ++x) {
-					data.emplace_back(0xffffffff); //white
-				}
-			}
-			assert(data.size() == size*size);
-
-			//make a place for the texture to live on the GPU:
-			textures.emplace_back(rtg.helpers.create_image(
-				VkExtent2D{ .width = size , .height = size }, //size of image
-				VK_FORMAT_R8G8B8A8_UNORM, //how to interpret image data (in this case, linearly-encoded 8-bit RGBA)
-				VK_IMAGE_TILING_OPTIMAL,
-				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, //will sample and upload
-				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, //should be device-local
-				Helpers::Unmapped
-			));
-
-			//transfer data:
-			rtg.helpers.transfer_to_image(data.data(), sizeof(data[0]) * data.size(), textures.back());
-
-			//
-			default_texture_index = 0;
-		}
-
-		load_all_textures();
-		
-	}
 
 	{ //make image views for the textures
-		texture_views.reserve(textures.size());
-		for (Helpers::AllocatedImage const &image : textures) {
+		material_system.texture_views.reserve(material_system.textures.size());
+		for (Helpers::AllocatedImage const &image : material_system.textures) {
 			VkImageViewCreateInfo create_info{
 				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 				.flags = 0,
@@ -1563,9 +446,9 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 			VkImageView image_view = VK_NULL_HANDLE;
 			VK( vkCreateImageView(rtg.device, &create_info, nullptr, &image_view) );
 
-			texture_views.emplace_back(image_view);
+			material_system.texture_views.emplace_back(image_view);
 		}
-		assert(texture_views.size() == textures.size());
+		assert(material_system.texture_views.size() == material_system.textures.size());
 	}
 
 	{ // make a sampler for the textures
@@ -1588,11 +471,11 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 			.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
 			.unnormalizedCoordinates = VK_FALSE,
 		};
-		VK( vkCreateSampler(rtg.device, &create_info, nullptr, &texture_sampler) );
+		VK( vkCreateSampler(rtg.device, &create_info, nullptr, &material_system.texture_sampler) );
 	}
 		
 	{ // create the material descriptor pool
-		uint32_t per_material = uint32_t(material_params.size()); //for easier-to-read counting
+		uint32_t per_material = uint32_t(material_system.material_params.size()); //for easier-to-read counting
 
 		std::array< VkDescriptorPoolSize, 2> pool_sizes{
 			VkDescriptorPoolSize{
@@ -1613,7 +496,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 			.pPoolSizes = pool_sizes.data(),
 		};
 
-		VK( vkCreateDescriptorPool(rtg.device, &create_info, nullptr, &material_descriptor_pool) );
+		VK( vkCreateDescriptorPool(rtg.device, &create_info, nullptr, &material_system.material_descriptor_pool) );
 	}
 
 	{ //allocate and write the material descriptor sets
@@ -1621,31 +504,31 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 		//allocate the descriptors (using the same alloc_info):
 		VkDescriptorSetAllocateInfo alloc_info{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-			.descriptorPool = material_descriptor_pool,
+			.descriptorPool = material_system.material_descriptor_pool,
 			.descriptorSetCount = 1,
 			.pSetLayouts = &objects_pipeline.set2_Material,
 		};
-		material_descriptors.assign(material_params.size(), VK_NULL_HANDLE);
-		for (VkDescriptorSet &descriptor_set : material_descriptors) {
+		material_system.material_descriptors.assign(material_system.material_params.size(), VK_NULL_HANDLE);
+		for (VkDescriptorSet &descriptor_set : material_system.material_descriptors) {
 			VK( vkAllocateDescriptorSets(rtg.device, &alloc_info, &descriptor_set) );
 		}
 
 		std::vector<VkWriteDescriptorSet> writes;
-		size_t N = material_descriptors.size();
+		size_t N = material_system.material_descriptors.size();
 		std::vector<VkDescriptorBufferInfo> material_params_infos(N);
 		std::vector<VkDescriptorImageInfo>  albedo_infos(N);
 		writes.reserve(N * 2);
 
 		for (size_t i = 0; i < N; ++i) {
 			material_params_infos[i] = VkDescriptorBufferInfo{
-				.buffer = material_params[i].handle,
+				.buffer = material_system.material_params[i].handle,
 				.offset = 0,
-				.range  = material_params[i].size,
+				.range  = material_system.material_params[i].size,
 			};
 
 			writes.push_back(VkWriteDescriptorSet{
 					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-					.dstSet = material_descriptors[i],
+					.dstSet = material_system.material_descriptors[i],
 					.dstBinding = 0, // MaterialParams
 					.dstArrayElement = 0,
 					.descriptorCount = 1,
@@ -1653,19 +536,19 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 					.pBufferInfo = &material_params_infos[i],
 			});
 
-			uint32_t tex_index = material_tex_info[i].has_albedo_tex ? material_tex_info[i].albedo_tex_index : default_texture_index;
+			uint32_t tex_index = material_system.material_tex_info[i].has_albedo_tex ? material_system.material_tex_info[i].albedo_tex_index : material_system.default_texture_index;
 
 			
 
 			albedo_infos[i] = VkDescriptorImageInfo{
-				.sampler = texture_sampler,
-				.imageView = texture_views[tex_index],
+				.sampler = material_system.texture_sampler,
+				.imageView = material_system.texture_views[tex_index],
 				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			};
 
 			writes.push_back(VkWriteDescriptorSet{
 				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-				.dstSet = material_descriptors[i],
+				.dstSet = material_system.material_descriptors[i],
 				.dstBinding = 1,
 				.dstArrayElement = 0,
 				.descriptorCount = 1,
@@ -1674,28 +557,6 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 			});
 		}
 
-		//write descriptors for textures:
-		// std::vector< VkDescriptorImageInfo > infos(textures.size());
-		// std::vector< VkWriteDescriptorSet > writes(textures.size());
-
-		// for (Helpers::AllocatedImage const &image : textures) {
-		// 	size_t i = &image - &textures[0];
-
-		// 	infos[i] = VkDescriptorImageInfo{
-		// 		.sampler = texture_sampler,
-		// 		.imageView = texture_views[i],
-		// 		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		// 	};
-		// 	writes[i] = VkWriteDescriptorSet{
-		// 		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		// 		.dstSet = material_descriptors[i],
-		// 		.dstBinding = 1,
-		// 		.dstArrayElement = 0,
-		// 		.descriptorCount = 1,
-		// 		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		// 		.pImageInfo = &infos[i],
-		// 	};
-		// }
 
 		vkUpdateDescriptorSets( rtg.device, uint32_t(writes.size()), writes.data(), 0, nullptr );
 	}
@@ -1709,34 +570,6 @@ Tutorial::~Tutorial() {
 		std::cerr << "Failed to vkDeviceWaitIdle in Tutorial::~Tutorial [" << string_VkResult(result) << "]; continuing anyway." << std::endl;
 	}
 
-	if (material_descriptor_pool) {
-		vkDestroyDescriptorPool(rtg.device, material_descriptor_pool, nullptr);
-		material_descriptor_pool = nullptr;
-
-		//this also frees the descriptor sets allocated from the pool:
-		material_descriptors.clear();
-	}
-
-	if (texture_sampler) {
-		vkDestroySampler(rtg.device, texture_sampler, nullptr);
-		texture_sampler = VK_NULL_HANDLE;
-	}
-
-	for (VkImageView &view : texture_views) {
-		vkDestroyImageView(rtg.device, view, nullptr);
-		view = VK_NULL_HANDLE;
-	}
-	texture_views.clear();
-
-	for (auto &texture : textures) {
-		rtg.helpers.destroy_image(std::move(texture));
-	}
-	textures.clear();
-
-	for (auto &material_param : material_params) {
-		rtg.helpers.destroy_buffer(std::move(material_param));
-	}
-	material_params.clear();
 
 	rtg.helpers.destroy_buffer(std::move(object_vertices));
 
@@ -1971,10 +804,10 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 
 		{ //upload world info:
 			// assert(workspace.Camera_src.size == sizeof(world));
-			assert(workspace.World_src.size == sizeof(world));
+			assert(workspace.World_src.size == sizeof(scene_viewer->world));
 
 			//host-side copy into World_src:
-			memcpy(workspace.World_src.allocation.data(), &world, sizeof(world));
+			memcpy(workspace.World_src.allocation.data(), &scene_viewer->world, sizeof(scene_viewer->world));
 
 			//add device-side copy from World_src -> World:
 			assert(workspace.World_src.size == workspace.World.size);
@@ -1992,20 +825,20 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 	cull_timer.start();
 
 	std::vector<uint32_t> draw_list;
-	draw_list.reserve(object_instances.size());
+	draw_list.reserve(scene_viewer->object_instances.size());
 	if (culling_mode == CullingMode::None) {
-		for (uint32_t i = 0; i < (uint32_t)object_instances.size(); ++i) draw_list.push_back(i);
+		for (uint32_t i = 0; i < (uint32_t)scene_viewer->object_instances.size(); ++i) draw_list.push_back(i);
 	} else if (culling_mode == CullingMode::Frustum) { //Frustum
 		glm::mat4 CLIP_FROM_WORLD_CULL_glm = to_glm(CLIP_FROM_WORLD_FOR_CULLING);
 
-		for (uint32_t i = 0; i < (uint32_t)object_instances.size(); ++i) {
-			ObjectInstance const& inst = object_instances[i];
-			AABB const& box_local = mesh_aabb_local.at(inst.mesh);
+		for (uint32_t i = 0; i < (uint32_t)scene_viewer->object_instances.size(); ++i) {
+			SceneViewer::ObjectInstance const& inst = scene_viewer->object_instances[i];
+			SceneViewer::AABB const& box_local = scene_viewer->mesh_aabb_local.at(inst.mesh);
 
 			glm::mat4 WORLD_FROM_LOCAL_glm = to_glm(inst.transform.WORLD_FROM_LOCAL);
 			glm::mat4 CLIP_FROM_LOCAL_glm  = CLIP_FROM_WORLD_CULL_glm * WORLD_FROM_LOCAL_glm;
 
-			if (aabb_intersects_frustum(box_local, CLIP_FROM_LOCAL_glm)) {
+			if (scene_viewer->aabb_intersects_frustum(box_local, CLIP_FROM_LOCAL_glm)) {
 				draw_list.push_back(i);
 			}
 		}
@@ -2013,17 +846,17 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 		glm::mat4 CLIP_FROM_WORLD_CULL_glm = to_glm(CLIP_FROM_WORLD_FOR_CULLING);
 
 		// bvh_lines_vertices.clear();
-		cull_with_bvh(CLIP_FROM_WORLD_CULL_glm, draw_list);
+		scene_viewer->cull_with_bvh(CLIP_FROM_WORLD_CULL_glm, draw_list);
 
 		//dynamic objects
-		for (uint32_t inst_idx : dynamic_instances) {
-			ObjectInstance const& inst = object_instances[inst_idx];
-			AABB const& box_local = mesh_aabb_local.at(inst.mesh);
+		for (uint32_t inst_idx : scene_viewer->dynamic_instances) {
+			SceneViewer::ObjectInstance const& inst = scene_viewer->object_instances[inst_idx];
+			SceneViewer::AABB const& box_local = scene_viewer->mesh_aabb_local.at(inst.mesh);
 
 			glm::mat4 WORLD_FROM_LOCAL_glm = to_glm(inst.transform.WORLD_FROM_LOCAL);
 			glm::mat4 CLIP_FROM_LOCAL_glm = CLIP_FROM_WORLD_CULL_glm * WORLD_FROM_LOCAL_glm;
 
-			if (aabb_intersects_frustum(box_local, CLIP_FROM_LOCAL_glm)) {
+			if (scene_viewer->aabb_intersects_frustum(box_local, CLIP_FROM_LOCAL_glm)) {
 				draw_list.push_back(inst_idx);
 			}
 		}
@@ -2101,7 +934,7 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			// }
 
 			for (uint32_t slot = 0; slot < (uint32_t)draw_list.size(); ++slot) {
-				ObjectInstance const &inst = object_instances[draw_list[slot]];
+				SceneViewer::ObjectInstance const &inst = scene_viewer->object_instances[draw_list[slot]];
 				*out = inst.transform;
 				++out;
 			}
@@ -2171,11 +1004,11 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 
 		float target_aspect = fb_aspect;
 		bool constrain_to_camera_aspect = (camera_mode == CameraMode::Scene) && (!debug_camera_mode);
-		if (constrain_to_camera_aspect && current_camera_index < camera_aspects.size()) {
-			target_aspect = camera_aspects[current_camera_index];
+		if (constrain_to_camera_aspect && current_camera_index < scene_viewer->camera_aspects.size()) {
+			target_aspect = scene_viewer->camera_aspects[current_camera_index];
 		}
 
-		target_aspect = camera_aspects[current_camera_index];
+		target_aspect = scene_viewer->camera_aspects[current_camera_index];
 
 		uint32_t vp_x = 0, vp_y = 0, vp_w = fb_w, vp_h = fb_h;
 
@@ -2319,7 +1152,7 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			// }
 
 			for (uint32_t slot = 0; slot < (uint32_t)draw_list.size(); ++slot) {
-				ObjectInstance const& inst = object_instances[draw_list[slot]];
+				SceneViewer::ObjectInstance const& inst = scene_viewer->object_instances[draw_list[slot]];
 
 				//bind material descriptor set:
 				vkCmdBindDescriptorSets(
@@ -2327,7 +1160,7 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 					VK_PIPELINE_BIND_POINT_GRAPHICS, //pipeline bind point
 					objects_pipeline.layout, //pipeline layout
 					2, //second set
-					1, &material_descriptors[inst.material], //descriptor sets count, ptr
+					1, &material_system.material_descriptors[inst.material], //descriptor sets count, ptr
 					0, nullptr //dynamic offsets count, ptr
 				);
 
@@ -2412,7 +1245,7 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 	if (perf_log.is_open()) {
 		perf_log
 		<< frame_id++ << ","
-		<< object_instances.size() << ","
+		<< scene_viewer->object_instances.size() << ","
 		<< draw_list.size() << ","
 		<< cpu_cull_ms << ","
 		<< cpu_frame_ms << ","
@@ -2444,9 +1277,9 @@ void Tutorial::update(float dt) {
 	}
 
 
-	if (!s72.drivers.empty()) {
-		apply_drivers(anim_time);
-		update_scene_objects();
+	if (!scene_viewer->s72.drivers.empty()) {
+		scene_viewer->apply_drivers(anim_time);
+		scene_viewer->update_scene_objects();
 	}
 
 	if (camera_mode == CameraMode::Scene) { 
@@ -2464,7 +1297,7 @@ void Tutorial::update(float dt) {
 		// 	0.0f, 0.0f, 1.0f //up
 		// );
 
-		CLIP_FROM_WORLD = camera_proj_matrices[current_camera_index] * camera_view_matrices[current_camera_index];
+		CLIP_FROM_WORLD = scene_viewer->camera_proj_matrices[current_camera_index] * scene_viewer->camera_view_matrices[current_camera_index];
 		
 	} else if (camera_mode == CameraMode::Free) {
 		CLIP_FROM_WORLD = perspective(
@@ -2483,8 +1316,8 @@ void Tutorial::update(float dt) {
 	CLIP_FROM_WORLD_FOR_CULLING = CLIP_FROM_WORLD;
 
 	if (debug_camera_mode) {
-		frustum_lines_vertices.clear();
-		append_frustum_lines_world(to_glm(CLIP_FROM_WORLD), 255, 255, 0, 255);
+		scene_viewer->frustum_lines_vertices.clear();
+		scene_viewer->append_frustum_lines_world(to_glm(CLIP_FROM_WORLD), 255, 255, 0, 255);
 
 		CLIP_FROM_WORLD = perspective(
 			debug_camera.fov,
@@ -2497,11 +1330,11 @@ void Tutorial::update(float dt) {
 		);
 
 		lines_vertices.clear();
-		for (auto & v : bbox_lines_vertices) {
+		for (auto & v : scene_viewer->bbox_lines_vertices) {
 			lines_vertices.push_back(v);
 		}
 
-		for (auto & v : frustum_lines_vertices) {
+		for (auto & v : scene_viewer->frustum_lines_vertices) {
 			lines_vertices.push_back(v);
 		}
 
@@ -2513,344 +1346,25 @@ void Tutorial::update(float dt) {
 	}
 
 	// { //static sun and sky:
-	// 	world.SKY_DIRECTION.x = 0.0f;
-	// 	world.SKY_DIRECTION.y = 0.0f;
-	// 	world.SKY_DIRECTION.z = 1.0f;
+	// 	scene_viewer->world.SKY_DIRECTION.x = 0.0f;
+	// 	scene_viewer->world.SKY_DIRECTION.y = 0.0f;
+	// 	scene_viewer->world.SKY_DIRECTION.z = 1.0f;
 
-	// 	world.SKY_ENERGY.r = 0.1f;
-	// 	world.SKY_ENERGY.g = 0.1f;
-	// 	world.SKY_ENERGY.b = 0.2f;
+	// 	scene_viewer->world.SKY_ENERGY.r = 0.1f;
+	// 	scene_viewer->world.SKY_ENERGY.g = 0.1f;
+	// 	scene_viewer->world.SKY_ENERGY.b = 0.2f;
 
-	// 	world.SUN_DIRECTION.x = 6.0f / 23.0f;
-	// 	world.SUN_DIRECTION.y = 13.0f / 23.0f;
-	// 	world.SUN_DIRECTION.z = 18.0f / 23.0f;
+	// 	scene_viewer->world.SUN_DIRECTION.x = 6.0f / 23.0f;
+	// 	scene_viewer->world.SUN_DIRECTION.y = 13.0f / 23.0f;
+	// 	scene_viewer->world.SUN_DIRECTION.z = 18.0f / 23.0f;
 
-	// 	world.SUN_ENERGY.r = 1.0f;
-	// 	world.SUN_ENERGY.g = 1.0f;
-	// 	world.SUN_ENERGY.b = 0.9f;
+	// 	scene_viewer->world.SUN_ENERGY.r = 1.0f;
+	// 	scene_viewer->world.SUN_ENERGY.g = 1.0f;
+	// 	scene_viewer->world.SUN_ENERGY.b = 0.9f;
 	// }
 
 	
-
-	// { //Time of Day Effect:
-
-	// 	float t = time * 1.0f;
-
-	// 	float sx = std::cos(t);
-	// 	float sy = 0.0f;
-	// 	float sz = std::sin(t);
-
-	// 	//normalize
-	// 	float len = std::sqrt(sx*sx + sz*sz);
-	// 	if (len < 1e-6f) len = 1.0f;
-	// 	sx /= len; sz /= len;
-
-	// 	world.SUN_DIRECTION = { sx, sy, sz, 0.0f };
-
-	// 	float day = sz;
-	// 	if (day < 0.0f) day = 0.0f;
-	// 	if (day > 1.0f) day = 1.0f;
-
-	// 	//sunset factor peaks near horizon when sun is still above it:
-	// 	float sunset = 1.0f - std::fabs(sz); //0 at noon/midnight, 1 near horizon
-	// 	if (sunset < 0.0f) sunset = 0.0f;
-	// 	if (sunset > 1.0f) sunset = 1.0f;
-
-	// 	//only apply sunset warmth when sun is above horizon:
-	// 	float sunset_warm = sunset * day;
-
-	// 	//Base sun brightness:
-	// 	float sunI = day * day;
-	// 	world.SUN_ENERGY = {
-	// 		(4.2f * sunI + 2.2f * sunset_warm),
-	// 		(2.4f * sunI + 0.9f * sunset_warm),
-	// 		(1.2f * sunI + 0.1f * sunset_warm),
-	// 		0.0f
-	// 	};
-
-	// 	world.SKY_DIRECTION = { 0.0f, 0.0f, 1.0f, 0.0f };
-
-	// 	//Want this when sz is slightly negative, e.g. [-0.25, 0]
-	// 	//Map sz in [-0.25, 0] -> blueHour in [0, 1]
-	// 	float blueHour = (sz + 0.25f) / 0.25f;
-	// 	if (blueHour < 0.0f) blueHour = 0.0f;
-	// 	if (blueHour > 1.0f) blueHour = 1.0f;
-
-	// 	//Also include dawn/dusk when sun is slightly above horizon:
-	// 	//Make it strongest near horizon regardless of sign, but bias to below-horizon:
-	// 	float nearHorizon = 1.0f - std::fabs(sz);
-	// 	if (nearHorizon < 0.0f) nearHorizon = 0.0f;
-	// 	if (nearHorizon > 1.0f) nearHorizon = 1.0f;
-
-	// 	float blueTone = 0.7f * blueHour + 0.3f * nearHorizon;
-
-	// 	float nightR = 0.00f, nightG = 0.01f, nightB = 0.03f;
-	// 	float dayR = 0.03f, dayG = 0.08f, dayB = 0.28f;
-	// 	float blueR = 0.00f, blueG = 0.06f, blueB = 0.40f;
-
-	// 	float skyR = nightR + dayR * day + blueR * blueTone;
-	// 	float skyG = nightG + dayG * day + blueG * blueTone;
-	// 	float skyB = nightB + dayB * day + blueB * blueTone;
-
-	// 	world.SKY_ENERGY = { skyR, skyG, skyB, 0.0f };
-	// }
-
-
-
-	// { //engine
-	// 	float s = 1.7f;
-
-	// 	mat4 SCALE = mat4{
-	// 		s, 0, 0, 0,
-	// 		0, s, 0, 0,
-	// 		0, 0, s, 0,
-	// 		0, 0, 0, 1
-	// 	};
-
-	// 	float z0 = 0.6f;
-
-	// 	CLIP_FROM_WORLD =
-	// 		perspective(
-	// 			60.0f * float(M_PI) / 180.0f,
-	// 			rtg.swapchain_extent.width / float(rtg.swapchain_extent.height),
-	// 			0.1f,
-	// 			1000.0f
-	// 		) * look_at(
-	// 			0.0f, 0.0f, z0 + 4.0f,
-	// 			0.0f, 0.0f, z0,
-	// 			0.0f, 1.0f, 0.0f
-	// 		) * SCALE;
-	// }
-
-	// //make an 'x':
-	// lines_vertices.clear();
-	// lines_vertices.reserve(4);
-	// lines_vertices.emplace_back(PosColVertex{
-	// 	.Position{ .x = -1.0f, .y = -1.0f, .z = 0.0f},
-	// 	.Color{ .r = 0xff, .g = 0xff, .b = 0xff, .a = 0xff}
-	// });
-	// lines_vertices.emplace_back(PosColVertex{
-	// 	.Position{ .x = 1.0f, .y = 1.0f, .z = 0.0f},
-	// 	.Color{ .r = 0xff, .g = 0x00, .b = 0x00, .a = 0xff}
-	// });
-	// lines_vertices.emplace_back(PosColVertex{
-	// 	.Position{ .x = -1.0f, .y = 1.0f, .z = 0.0f },
-	// 	.Color{ .r = 0x00, .g = 0x00, .b = 0xff, .a = 0xff }
-	// });
-	// lines_vertices.emplace_back(PosColVertex{
-	// 	.Position{ .x = 1.0f, .y = -1.0f, .z = 0.0f },
-	// 	.Color{ .r = 0x00, .g = 0x00, .b = 0xff, .a = 0xff }
-	// });
-	// assert(lines_vertices.size() == 4);
-
-	// { //make some crossing lines at different depths:
-	// 	lines_vertices.clear();
-	// 	constexpr size_t count = 2 * 30 + 2 * 30;
-	// 	lines_vertices.reserve(count);
-	// 	//horizontal lines at z = 0.5f:
-	// 	for (uint32_t i = 0; i < 30; ++i) {
-	// 		float y = (i + 0.5f) / 30.0f * 2.0f - 1.0f;
-	// 		lines_vertices.emplace_back(PosColVertex{
-	// 			.Position{.x = -1.0f, .y = y, .z = 0.5f},
-	// 			.Color{ .r = 0xff, .g = 0xff, .b = 0x00, .a = 0xff},
-	// 		});
-	// 		lines_vertices.emplace_back(PosColVertex{
-	// 			.Position{.x = 1.0f, .y = y, .z = 0.5f},
-	// 			.Color{ .r = 0xff, .g = 0xff, .b = 0x00, .a = 0xff},
-	// 		});
-	// 	}
-	// 	//vertical lines at z = 0.0f (near) through 1.0f (far):
-	// 	for (uint32_t i = 0; i < 30; ++i) {
-	// 		float x = (i + 0.5f) / 30.0f * 2.0f - 1.0f;
-	// 		float z = (i + 0.5f) / 30.0f;
-	// 		lines_vertices.emplace_back(PosColVertex{
-	// 			.Position{.x = x, .y =-1.0f, .z = z},
-	// 			.Color{ .r = 0x44, .g = 0x00, .b = 0xff, .a = 0xff},
-	// 		});
-	// 		lines_vertices.emplace_back(PosColVertex{
-	// 			.Position{.x = x, .y = 1.0f, .z = z},
-	// 			.Color{ .r = 0x44, .g = 0x00, .b = 0xff, .a = 0xff},
-	// 		});
-	// 	}
-
-	// 	assert(lines_vertices.size() == count);
-	// }
-	
-	update_object_instances_camera();
-	// { //make some objects:
-	// 	object_instances.clear();
-
-	// 	{ //plane translated +x by one unit:
-	// 		mat4 WORLD_FROM_LOCAL{
-	// 			1.0f, 0.0f, 0.0f, 0.0f,
-	// 			0.0f, 1.0f, 0.0f, 0.0f,
-	// 			0.0f, 0.0f, 1.0f, 0.0f,
-	// 			1.0f, 0.0f, 0.0f, 1.0f,
-	// 		};
-
-	// 		object_instances.emplace_back(ObjectInstance{
-	// 			.vertices = plane_vertices,
-	// 			.transform{
-	// 				.CLIP_FROM_LOCAL = CLIP_FROM_WORLD * WORLD_FROM_LOCAL,
-	// 				.WORLD_FROM_LOCAL = WORLD_FROM_LOCAL,
-	// 				.WORLD_FROM_LOCAL_NORMAL = WORLD_FROM_LOCAL,
-	// 			},
-	// 			.texture = 1,
-	// 		});
-	// 	}
-
-	// 	{ //torus translated -x by one unit and rotated CCW around +y:
-	// 		// float ang = time / 60.0f * 2.0f * float(M_PI) * 10.0f;
-	// 		float ang = 2.0f * float(M_PI) * 10.0f;
-	// 		float ca = std::cos(ang);
-	// 		float sa = std::sin(ang);
-	// 		mat4 WORLD_FROM_LOCAL{
-	// 			  ca, 0.0f,  -sa, 0.0f,
-	// 			0.0f, 1.0f, 0.0f, 0.0f,
-	// 			  sa, 0.0f,   ca, 0.0f,
-	// 			-1.0f,0.0f, 0.0f, 1.0f,
-	// 		};
-
-	// 		object_instances.emplace_back(ObjectInstance{
-	// 			.vertices = torus_vertices,
-	// 			.transform{
-	// 				.CLIP_FROM_LOCAL = CLIP_FROM_WORLD * WORLD_FROM_LOCAL,
-	// 				.WORLD_FROM_LOCAL = WORLD_FROM_LOCAL,
-	// 				.WORLD_FROM_LOCAL_NORMAL = WORLD_FROM_LOCAL,
-	// 			},
-	// 		});
-	// 	}
-	// }
-
-	// {//jet engine front view (intake ring + spinner + curved blades)
-	// 	lines_vertices.clear();
-
-	// 	auto add_line = [&](float ax, float ay, float az,
-	// 						float bx, float by, float bz,
-	// 						uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff) {
-	// 		lines_vertices.emplace_back(PosColVertex{
-	// 			.Position{ .x = ax, .y = ay, .z = az },
-	// 			.Color{ .r = r, .g = g, .b = b, .a = a }
-	// 		});
-	// 		lines_vertices.emplace_back(PosColVertex{
-	// 			.Position{ .x = bx, .y = by, .z = bz },
-	// 			.Color{ .r = r, .g = g, .b = b, .a = a }
-	// 		});
-	// 	};
-
-	// 	auto add_ring = [&](float z, float radius, int segments, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff) {
-	// 		for (int i = 0; i < segments; ++i) {
-	// 			float t0 = float(i) / float(segments) * 2.0f * float(M_PI);
-	// 			float t1 = float(i + 1) / float(segments) * 2.0f * float(M_PI);
-	// 			float x0 = radius * std::cos(t0), y0 = radius * std::sin(t0);
-	// 			float x1 = radius * std::cos(t1), y1 = radius * std::sin(t1);
-	// 			add_line(x0, y0, z, x1, y1, z, r, g, b, a);
-	// 		}
-	// 	};
-
-	// 	auto add_arc = [&](float z, float radius, float a0, float a1, int steps,
-	// 					uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff) {
-	// 		float prevx = radius * std::cos(a0);
-	// 		float prevy = radius * std::sin(a0);
-	// 		for (int i = 1; i <= steps; ++i) {
-	// 			float t = float(i) / float(steps);
-	// 			float ang = a0 + (a1 - a0) * t;
-	// 			float x = radius * std::cos(ang);
-	// 			float y = radius * std::sin(ang);
-	// 			add_line(prevx, prevy, z, x, y, z, r, g, b, a);
-	// 			prevx = x; prevy = y;
-	// 		}
-	// 	};
-
-	// 	const float z0 = 0.6f;
-
-	// 	//Dimensions (tweak these):
-	// 	const float R_outer = 1.05f; //nacelle / intake lip
-	// 	const float R_inner = 0.98f; //inner intake ring
-	// 	const float R_fan   = 0.85f; //blade tip radius
-	// 	const float R_hub   = 0.28f; //spinner / hub radius
-	// 	const float R_root  = 0.40f; //blade root radius
-
-	// 	//Rotation:
-	// 	float angular_accel = 0.1f;
-	// 	float max_omega     = 0.2f;
-
-	// 	float omega = angular_accel * time;
-	// 	omega = std::min(omega, max_omega);
-
-	// 	static float spin = 0.0f;
-	// 	spin += omega * dt;
-	// 	// float spin = time * 10.0f; // rad/sec (slow-ish like a display)
-
-	// 	//Draw intake rings (outer bright, inner darker):
-	// 	add_ring(z0, R_outer, 160, 0xcc, 0xcc, 0xcc); //silver-ish
-	// 	add_ring(z0, R_inner, 160, 0x66, 0x88, 0xaa); //cooler inner ring
-
-	// 	//Draw fan boundary ring (where blade tips sit):
-	// 	add_ring(z0, R_fan, 140, 0x22, 0x22, 0x22);
-
-	// 	//Draw hub/spinner rings:
-	// 	add_ring(z0, R_hub, 120, 0xee, 0xee, 0xee);
-	// 	add_ring(z0, R_hub * 0.55f, 90, 0xff, 0xff, 0xff);
-
-	// 	//Draw a simple "spiral" mark on spinner (like the logo swirl):
-	// 	{ 
-	// 		const int steps = 120;
-	// 		float prevx = 0.0f, prevy = 0.0f;
-	// 		for (int i = 0; i <= steps; ++i) {
-	// 			float t = float(i) / float(steps);
-	// 			float ang = spin + t * 5.0f * float(M_PI);
-	// 			float rad = (R_hub * 0.50f) * t;
-	// 			float x = rad * std::cos(ang);
-	// 			float y = rad * std::sin(ang);
-	// 			if (i > 0) add_line(prevx, prevy, z0, x, y, z0, 0xff, 0xff, 0xff);
-	// 			prevx = x; prevy = y;
-	// 		}
-	// 	}
-
-	// 	//Fan blades (curved / swept arcs + root connector)
-	// 	//Fake a “curved blade” using:
-	// 	//- a small arc near the root
-	// 	//- a larger arc near the tip, with a sweep angle offset
-	// 	//- connect root->tip edges
-	// 	const int blades = 22;
-	// 	lines_vertices.reserve(lines_vertices.size() + size_t(blades) * 60);
-
-	// 	for (int i = 0; i < blades; ++i) {
-	// 		float base = spin + float(i) / float(blades) * 2.0f * float(M_PI);
-
-	// 		//Blade angular span and sweep (tweak for more/less curvature):
-	// 		float width = 0.09f;              //how wide each blade is in angle
-	// 		float sweep = 0.28f;              //tip swept forward
-	// 		float a_root0 = base - width;
-	// 		float a_root1 = base + width;
-	// 		float a_tip0  = base - width + sweep;
-	// 		float a_tip1  = base + width + sweep;
-
-	// 		//Root arc segment (small, darker):
-	// 		add_arc(z0, R_root, a_root0, a_root1, 8, 0x88, 0x88, 0x88);
-
-	// 		//Tip arc segment (bright):
-	// 		add_arc(z0, R_fan, a_tip0, a_tip1, 10, 0xdd, 0xdd, 0xdd);
-
-	// 		//Connect root edges to tip edges (leading/trailing edges):
-	// 		float rx0 = R_root * std::cos(a_root0), ry0 = R_root * std::sin(a_root0);
-	// 		float rx1 = R_root * std::cos(a_root1), ry1 = R_root * std::sin(a_root1);
-	// 		float tx0 = R_fan  * std::cos(a_tip0),  ty0 = R_fan  * std::sin(a_tip0);
-	// 		float tx1 = R_fan  * std::cos(a_tip1),  ty1 = R_fan  * std::sin(a_tip1);
-
-	// 		add_line(rx0, ry0, z0, tx0, ty0, z0, 0xbb, 0xbb, 0xbb); //one side
-	// 		add_line(rx1, ry1, z0, tx1, ty1, z0, 0xbb, 0xbb, 0xbb); //other side
-
-	// 		//Root to hub connector (gives “blade attaches to spinner” feel):
-	// 		float hx = R_hub * std::cos(base), hy = R_hub * std::sin(base);
-	// 		float mx = R_root * std::cos(base), my = R_root * std::sin(base);
-	// 		add_line(hx, hy, z0, mx, my, z0, 0x66, 0x66, 0x66);
-	// 	}
-
-	// 	//Optional: inner dark “engine core” ring to add depth:
-	// 	add_ring(z0, 0.12f, 60, 0x11, 0x11, 0x11);
-	// }
+	scene_viewer->update_object_instances_camera(CLIP_FROM_WORLD);
 
 }
 
@@ -2876,7 +1390,7 @@ void Tutorial::on_input(InputEvent const &evt) {
 	}
 
 	//general controls:
-	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_TAB && camera_indices.size() != 0) {
+	if (evt.type == InputEvent::KeyDown && evt.key.key == GLFW_KEY_TAB && scene_viewer->camera_indices.size() != 0) {
 		//switch camera modes
 		camera_mode = CameraMode((int(camera_mode) + 1) % 2);
 		return;
@@ -2897,19 +1411,19 @@ void Tutorial::on_input(InputEvent const &evt) {
 		evt.type == InputEvent::KeyDown) {
 
 		if (evt.key.key == GLFW_KEY_LEFT_BRACKET) {	// [
-			if (!camera_indices.empty()) {
+			if (!scene_viewer->camera_indices.empty()) {
 				current_camera_index =
-					(current_camera_index + camera_indices.size() - 1)
-					% camera_indices.size();
+					(current_camera_index + scene_viewer->camera_indices.size() - 1)
+					% scene_viewer->camera_indices.size();
 			}
 			return;
 		}
 
 		if (evt.key.key == GLFW_KEY_RIGHT_BRACKET) {  // ]
-			if (!camera_indices.empty()) {
+			if (!scene_viewer->camera_indices.empty()) {
 				current_camera_index =
 					(current_camera_index + 1)
-					% camera_indices.size();
+					% scene_viewer->camera_indices.size();
 			}
 			return;
 		}

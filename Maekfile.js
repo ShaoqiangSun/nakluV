@@ -35,6 +35,8 @@ const main_objs = [
 	maek.CPP('Helpers.cpp'),
 	maek.CPP('sejp.cpp'),
 	maek.CPP('S72.cpp'),
+	maek.CPP('SceneViewer.cpp'),
+	maek.CPP('MaterialSystem.cpp'),
 	maek.CPP('main.cpp'),
 ];
 
