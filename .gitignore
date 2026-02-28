@@ -4,3 +4,6 @@ spv/
 bin/main
 bin/main.exe
 bin/main.pdb
+bin/cube
+bin/cube.exe
+bin/cube.pdb

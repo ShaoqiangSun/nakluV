@@ -83,7 +83,7 @@ struct RTG {
 		std::string culling_mode = "";
 		std::string test_mode = "";
 		std::string cpu_test_culled_count = "";
-		std::string csv_file_name = "";
+		std::string csv_file = "";
 
 		//for configuration construction + management:
 		Configuration() = default;

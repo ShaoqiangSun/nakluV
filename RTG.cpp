@@ -70,10 +70,8 @@ void RTG::Configuration::parse(int argc, char **argv) {
 		} else if (arg == "--csv-file-name") {
 			if (argi + 1 >= argc) throw std::runtime_error("--csv-file-name requires a parameter (a file name).");
 			argi += 1;
-			csv_file_name = argv[argi];
-		}
-		
-		else {
+			csv_file = argv[argi];
+		} else {
 			throw std::runtime_error("Unrecognized argument '" + arg + "'.");
 		}
 	}

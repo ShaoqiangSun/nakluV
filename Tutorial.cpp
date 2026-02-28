@@ -69,6 +69,8 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 
 			material_system.build_material_texture(scene_viewer->s72);
 			material_system.load_all_textures();
+			material_system.load_environment_map(scene_viewer->s72);
+			material_system.load_environment_map_diffuse();
 			
 			if (!rtg.configuration.camera_name.empty()) {
 				if (scene_viewer->s72.cameras.count(rtg.configuration.camera_name) == 0) {
@@ -89,9 +91,9 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				);
 			}
 
-			std::string csv_file_name = rtg.configuration.csv_file_name.empty() ? "perf.csv" : rtg.configuration.csv_file_name;
+			std::string csv_file = rtg.configuration.csv_file.empty() ? "perf.csv" : rtg.configuration.csv_file;
 
-			perf_log.open(csv_file_name);
+			perf_log.open(csv_file);
 
 			if (!perf_log) {
 				throw std::runtime_error("Failed to open perf.csv");
@@ -104,6 +106,9 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 			
 			material_system.build_material_texture(scene_viewer->s72);
 			material_system.load_all_textures();
+			material_system.load_environment_map(scene_viewer->s72);
+			material_system.load_environment_map_diffuse();
+
 
 			if (!rtg.configuration.camera_name.empty()) {
 				if (scene_viewer->s72.cameras.count(rtg.configuration.camera_name) == 0) {
@@ -240,18 +245,73 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 	background_pipeline.create(rtg, render_pass, 0);
 	lines_pipeline.create(rtg, render_pass, 0);
 	objects_pipeline.create(rtg, render_pass, 0);
+
+	// { //make image views for the textures
+	// 	material_system.texture_views.reserve(material_system.textures.size());
+	// 	for (Helpers::AllocatedImage const &image : material_system.textures) {
+	// 		VkImageViewCreateInfo create_info{
+	// 			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+	// 			.flags = 0,
+	// 			.image = image.handle,
+	// 			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+	// 			.format = image.format,
+	// 			// .components sets swizzling and is fine when zero-initialized
+	// 			.subresourceRange{
+	// 				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+	// 				.baseMipLevel = 0,
+	// 				.levelCount = 1,
+	// 				.baseArrayLayer = 0,
+	// 				.layerCount = 1,
+	// 			},
+	// 		};
+
+	// 		VkImageView image_view = VK_NULL_HANDLE;
+	// 		VK( vkCreateImageView(rtg.device, &create_info, nullptr, &image_view) );
+
+	// 		material_system.texture_views.emplace_back(image_view);
+	// 	}
+	// 	assert(material_system.texture_views.size() == material_system.textures.size());
+
+	// }
+
+	// { // make a sampler for the textures
+	// 	VkSamplerCreateInfo create_info{
+	// 		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+	// 		.flags = 0,
+	// 		.magFilter = VK_FILTER_NEAREST,
+	// 		.minFilter = VK_FILTER_NEAREST,
+	// 		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+	// 		.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+	// 		.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+	// 		.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+	// 		.mipLodBias = 0.0f,
+	// 		.anisotropyEnable = VK_FALSE,
+	// 		.maxAnisotropy = 0.0f, //doesn't matter if anisotropy isn't enabled
+	// 		.compareEnable = VK_FALSE,
+	// 		.compareOp = VK_COMPARE_OP_ALWAYS, //doesn't matter if compare isn't enabled
+	// 		.minLod = 0.0f,
+	// 		.maxLod = 0.0f,
+	// 		.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+	// 		.unnormalizedCoordinates = VK_FALSE,
+	// 	};
+	// 	VK( vkCreateSampler(rtg.device, &create_info, nullptr, &material_system.texture_sampler) );
+	// }
 	
 
 	{ //create descriptor pool:
 		uint32_t per_workspace = uint32_t(rtg.workspaces.size());  //for easier-to-read counting
-		std::array< VkDescriptorPoolSize, 2> pool_sizes{
+		std::array< VkDescriptorPoolSize, 3> pool_sizes{
 			VkDescriptorPoolSize{
 				.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-				.descriptorCount = 2 * per_workspace, //one descriptor per set, two sets per workspace
+				.descriptorCount = 2 * per_workspace, //Camera + World, one descriptor per set, two sets per workspace
 			},
 			VkDescriptorPoolSize{
 				.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-				.descriptorCount = 1 * per_workspace, //one descriptor per set, one set per workspace
+				.descriptorCount = 1 * per_workspace, //Transforms, one descriptor per set, one set per workspace
+			},
+			VkDescriptorPoolSize{
+				.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.descriptorCount = 2 * per_workspace, //Env + diffuse cubemap, one descriptor per set, one set per workspace
 			},
 		};
 
@@ -355,7 +415,19 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				.range = workspace.World.size,
 			};
 
-			std::array< VkWriteDescriptorSet, 2 > writes {
+			VkDescriptorImageInfo Env_info{
+				.sampler = material_system.env_cube_sampler,
+				.imageView = material_system.env_cube_view,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+
+			VkDescriptorImageInfo Env_Diffuse_info{
+				.sampler = material_system.env_cube_sampler,
+				.imageView = material_system.diffuse_cube_view,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+
+			std::array< VkWriteDescriptorSet, 4 > writes {
 				VkWriteDescriptorSet{
 					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 					.dstSet = workspace.Camera_descriptors,
@@ -373,6 +445,24 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 					.descriptorCount = 1,
 					.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 					.pBufferInfo = &World_info,
+				},
+				VkWriteDescriptorSet{
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = workspace.World_descriptors,
+					.dstBinding = 1,
+					.dstArrayElement = 0,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.pImageInfo = &Env_info,
+				},
+				VkWriteDescriptorSet{
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = workspace.World_descriptors,
+					.dstBinding = 2,
+					.dstArrayElement = 0,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.pImageInfo = &Env_Diffuse_info,
 				},
 			};
 
@@ -404,7 +494,6 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		rtg.helpers.transfer_to_buffer(vertices.data(), bytes, object_vertices);
 	}
 
-	// build_material_texture();
 	scene_viewer->build_scene_objects();
 	scene_viewer->cache_rest_pose_and_duration(anim_duration);
 
@@ -449,6 +538,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 			material_system.texture_views.emplace_back(image_view);
 		}
 		assert(material_system.texture_views.size() == material_system.textures.size());
+
 	}
 
 	{ // make a sampler for the textures
@@ -516,7 +606,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		std::vector<VkWriteDescriptorSet> writes;
 		size_t N = material_system.material_descriptors.size();
 		std::vector<VkDescriptorBufferInfo> material_params_infos(N);
-		std::vector<VkDescriptorImageInfo>  albedo_infos(N);
+		std::vector<VkDescriptorImageInfo> albedo_infos(N);
 		writes.reserve(N * 2);
 
 		for (size_t i = 0; i < N; ++i) {
@@ -1282,6 +1372,7 @@ void Tutorial::update(float dt) {
 		scene_viewer->update_scene_objects();
 	}
 
+	glm::vec3 eye;
 	if (camera_mode == CameraMode::Scene) { 
 		//camera rotating around the origin:
 		// float ang = float(M_PI) * 2.0f * 10.0f * (time / 60.0f);
@@ -1298,6 +1389,9 @@ void Tutorial::update(float dt) {
 		// );
 
 		CLIP_FROM_WORLD = scene_viewer->camera_proj_matrices[current_camera_index] * scene_viewer->camera_view_matrices[current_camera_index];
+
+		glm::mat4 view = to_glm(scene_viewer->camera_view_matrices[current_camera_index]);
+		eye = glm::vec3(glm::inverse(view)[3]);
 		
 	} else if (camera_mode == CameraMode::Free) {
 		CLIP_FROM_WORLD = perspective(
@@ -1309,6 +1403,11 @@ void Tutorial::update(float dt) {
 			free_camera.target_x, free_camera.target_y, free_camera.target_z,
 			free_camera.azimuth, free_camera.elevation, free_camera.radius
 		);
+
+		eye.x = free_camera.target_x + free_camera.radius * cos(free_camera.elevation) * cos(free_camera.azimuth);
+		eye.y = free_camera.target_y + free_camera.radius * cos(free_camera.elevation) * sin(free_camera.azimuth);
+		eye.z = free_camera.target_z + free_camera.radius * sin(free_camera.elevation);
+
 	} else {
 		assert(0 && "only two camera modes");
 	}
@@ -1345,25 +1444,28 @@ void Tutorial::update(float dt) {
 		// }
 	}
 
-	// { //static sun and sky:
-	// 	scene_viewer->world.SKY_DIRECTION.x = 0.0f;
-	// 	scene_viewer->world.SKY_DIRECTION.y = 0.0f;
-	// 	scene_viewer->world.SKY_DIRECTION.z = 1.0f;
+	{ //static sun and sky:
+		scene_viewer->world.SKY_DIRECTION.x = 0.0f;
+		scene_viewer->world.SKY_DIRECTION.y = 0.0f;
+		scene_viewer->world.SKY_DIRECTION.z = 1.0f;
 
-	// 	scene_viewer->world.SKY_ENERGY.r = 0.1f;
-	// 	scene_viewer->world.SKY_ENERGY.g = 0.1f;
-	// 	scene_viewer->world.SKY_ENERGY.b = 0.2f;
+		scene_viewer->world.SKY_ENERGY.r = 0.1f;
+		scene_viewer->world.SKY_ENERGY.g = 0.1f;
+		scene_viewer->world.SKY_ENERGY.b = 0.2f;
 
-	// 	scene_viewer->world.SUN_DIRECTION.x = 6.0f / 23.0f;
-	// 	scene_viewer->world.SUN_DIRECTION.y = 13.0f / 23.0f;
-	// 	scene_viewer->world.SUN_DIRECTION.z = 18.0f / 23.0f;
+		scene_viewer->world.SUN_DIRECTION.x = 6.0f / 23.0f;
+		scene_viewer->world.SUN_DIRECTION.y = 13.0f / 23.0f;
+		scene_viewer->world.SUN_DIRECTION.z = 18.0f / 23.0f;
 
-	// 	scene_viewer->world.SUN_ENERGY.r = 1.0f;
-	// 	scene_viewer->world.SUN_ENERGY.g = 1.0f;
-	// 	scene_viewer->world.SUN_ENERGY.b = 0.9f;
-	// }
+		scene_viewer->world.SUN_ENERGY.r = 1.0f;
+		scene_viewer->world.SUN_ENERGY.g = 1.0f;
+		scene_viewer->world.SUN_ENERGY.b = 0.9f;
+	}
 
-	
+	scene_viewer->world.EYE.x = eye.x;
+	scene_viewer->world.EYE.y = eye.y;
+	scene_viewer->world.EYE.z = eye.z;
+
 	scene_viewer->update_object_instances_camera(CLIP_FROM_WORLD);
 
 }

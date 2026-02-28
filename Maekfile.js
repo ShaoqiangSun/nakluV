@@ -40,6 +40,11 @@ const main_objs = [
 	maek.CPP('main.cpp'),
 ];
 
+const cube_objs = [
+	maek.CPP('PrecomputedIBL.cpp'),
+    maek.CPP('main-cube.cpp'),  
+];
+
 //maek.GLSLC(...) builds a glsl source file:
 // it returns the path to the output .inl file
 
@@ -67,9 +72,10 @@ main_objs.push( maek.CPP('Tutorial-ObjectsPipeline.cpp', undefined, { depends:[.
 
 
 const main_exe = maek.LINK([...main_objs], 'bin/main');
+const cube_exe = maek.LINK([...cube_objs], 'bin/cube');
 
 //default targets:
-maek.TARGETS = [main_exe];
+maek.TARGETS = [main_exe,cube_exe];
 
 //- - - - - - - - - - - - - - - - - - - - -
 function custom_flags_and_rules() {

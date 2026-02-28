@@ -101,8 +101,9 @@ struct Tutorial : RTG::Application {
 			struct { float r, g, b, padding_; } SKY_ENERGY;
 			struct { float x, y, z, padding_; } SUN_DIRECTION;
 			struct { float r, g, b, padding_; } SUN_ENERGY;
+			struct { float x, y, z, padding_; } EYE;
 		};
-		static_assert(sizeof(World) == 4*4 + 4*4 + 4*4 + 4*4, "World is the expected size.");
+		static_assert(sizeof(World) == 4*4 + 4*4 + 4*4 + 4*4 + 4*4, "World is the expected size.");
 
 		struct Transform {
 			mat4 CLIP_FROM_LOCAL;
@@ -113,6 +114,7 @@ struct Tutorial : RTG::Application {
 
 		struct Material {
 			struct { float r, g, b, padding_;} ALBEDO;
+			uint32_t TYPE, padding1_, padding2_, padding3_;
 		};
 
 		//no push constants

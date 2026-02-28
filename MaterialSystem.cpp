@@ -2,6 +2,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include "Tutorial.hpp"
+#include "VK.hpp"
+#include <iostream>
+
 
 MaterialSystem::MaterialSystem(RTG &rtg_) : rtg(rtg_) {
     
@@ -21,6 +24,11 @@ MaterialSystem::~MaterialSystem() {
 		texture_sampler = VK_NULL_HANDLE;
 	}
 
+    if (env_cube_sampler) {
+		vkDestroySampler(rtg.device, env_cube_sampler, nullptr);
+		env_cube_sampler = VK_NULL_HANDLE;
+	}
+
     for (VkImageView &view : texture_views) {
 		vkDestroyImageView(rtg.device, view, nullptr);
 		view = VK_NULL_HANDLE;
@@ -31,6 +39,24 @@ MaterialSystem::~MaterialSystem() {
 		rtg.helpers.destroy_image(std::move(texture));
 	}
 	textures.clear();
+
+    if (diffuse_cube_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(rtg.device, diffuse_cube_view, nullptr);
+        diffuse_cube_view = VK_NULL_HANDLE;
+    }
+
+    if (diffuse_cube.handle != VK_NULL_HANDLE) {
+        rtg.helpers.destroy_image(std::move(diffuse_cube));
+    }
+
+    if (env_cube_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(rtg.device, env_cube_view, nullptr);
+        env_cube_view = VK_NULL_HANDLE;
+    }
+
+    if (env_cube.handle != VK_NULL_HANDLE) {
+        rtg.helpers.destroy_image(std::move(env_cube));
+    }
 
     for (auto &material_param : material_params) {
 		rtg.helpers.destroy_buffer(std::move(material_param));
@@ -81,8 +107,14 @@ void MaterialSystem::build_material_texture(S72 const &s72) {
 			Helpers::Mapped
 	));
 
-	S72::color c{0.8f, 0.8f, 0.8f};
-	std::memcpy(material_params[0].allocation.data(), &c, sizeof(c));
+	{
+        //default material
+        Tutorial::ObjectsPipeline::Material m{};
+        m.ALBEDO = {0.8f, 0.8f, 0.8f, 0.0f};
+        //0=Lambertian, 1=Environment, 2=Mirror
+        m.TYPE = 0u;
+        std::memcpy(material_params[0].allocation.data(), &m, sizeof(m));
+    }
 
 	material_tex_info.emplace_back(MaterialTextureInfo{0, 0});
 
@@ -98,29 +130,53 @@ void MaterialSystem::build_material_texture(S72 const &s72) {
 
 		MaterialTextureInfo info{};
 
+        Tutorial::ObjectsPipeline::Material out{};
+        out.ALBEDO = {0.8f, 0.8f, 0.8f, 0.0f};
+        out.TYPE = 0u;
+
 		if (std::holds_alternative<S72::Material::Lambertian>(mat->brdf)) {
+            out.TYPE = 0u;
 			auto const& lam = std::get<S72::Material::Lambertian>(mat->brdf);
+
 			if (std::holds_alternative<S72::color>(lam.albedo)) {
 				auto const& c = std::get<S72::color>(lam.albedo);
-				//default material has index 0
-				std::memcpy(material_params[i + 1].allocation.data(), &c, sizeof(c));
+                out.ALBEDO = {c.r, c.g, c.b, 0.0f};
+
+                // //default material has index 0
+				// std::memcpy(material_params[i + 1].allocation.data(), &c, sizeof(c));
 			} 
 			else {
 				auto const* tex = std::get<S72::Texture*>(lam.albedo);
 				info.albedo_tex_index = texture_id.at(tex);
 				info.has_albedo_tex = 1;
 
-				S72::color c{1.0f, 1.0f, 1.0f};
-				//default material has index 0
-				std::memcpy(material_params[i + 1].allocation.data(), &c, sizeof(c));
+                out.ALBEDO = {1.0f, 1.0f, 1.0f, 0.0f};
+                
+				// S72::color c{1.0f, 1.0f, 1.0f};
+				// //default material has index 0
+				// std::memcpy(material_params[i + 1].allocation.data(), &c, sizeof(c));
 			}
 		}
+        else if (std::holds_alternative<S72::Material::Environment>(mat->brdf)) {
+            // environment: look up env map by normal
+            out.TYPE = 1u;
+            
+        }
+        else if (std::holds_alternative<S72::Material::Mirror>(mat->brdf)) {
+            // mirror: look up env map by reflection vector
+            out.TYPE = 2u;
+        
+        }
+        else if (std::holds_alternative<S72::Material::PBR>(mat->brdf)) {
+            // mirror: look up env map by reflection vector
+            out.TYPE = 3u;
 
+        }
+
+        std::memcpy(material_params[i + 1].allocation.data(), &out, sizeof(out));
 		material_tex_info.push_back(info);
-
-		
+	
 	}
-
 }
 
 void MaterialSystem::load_all_textures() {
@@ -161,7 +217,7 @@ void MaterialSystem::load_all_textures() {
     for (size_t i = 0; i < textures_list.size(); ++i) {
         S72::Texture const* tex = textures_list[i];
 
-        int w=0, h=0, comp=0;
+        int w = 0, h = 0, comp = 0;
         stbi_uc* pixels = stbi_load(tex->path.c_str(), &w, &h, &comp, 4);
         if (!pixels) throw std::runtime_error(std::string("stbi_load failed: ") + tex->path);
 
@@ -187,3 +243,173 @@ void MaterialSystem::load_all_textures() {
 
     }
 }
+
+void MaterialSystem::load_environment_map(S72 const &s72) {
+    if (s72.environments.empty()) return;
+
+    stbi_set_flip_vertically_on_load(false);
+
+    S72::Environment const &env = s72.environments.begin()->second;
+    S72::Texture const* tex = env.radiance;
+
+    assert(tex->type == S72::Texture::Type::cube);
+    assert(tex->format == S72::Texture::Format::rgbe);
+
+    int w = 0, h = 0, comp = 0;
+    stbi_uc* pixels = stbi_load(tex->path.c_str(), &w, &h, &comp, 4);
+    if (!pixels) throw std::runtime_error("Failed to load RGBE cubemap.");
+
+    size_t pixel_count = size_t(w) * size_t(h);
+
+    std::vector<float> decoded(pixel_count * 4);
+
+    for (size_t i = 0; i < pixel_count; ++i) {
+        uint8_t r = pixels[4 * i + 0];
+        uint8_t g = pixels[4 * i + 1];
+        uint8_t b = pixels[4 * i + 2];
+        uint8_t e = pixels[4 * i + 3];
+
+        float* out = &decoded[4 * i];
+        if (e == 0) {
+            out[0] = out[1] = out[2] = 0.0f;
+        } 
+        else {
+            float scale = std::ldexp(1.0f, int(e) - 128);
+            out[0] = scale * float(r + 0.5f) / 256 ;
+            out[1] = scale * float(g + 0.5f) / 256;
+            out[2] = scale * float(b + 0.5f) / 256;
+            out[3] = 1.0f;
+        }
+    }
+
+    stbi_image_free(pixels);
+    
+    uint32_t face = uint32_t(w);
+    assert(h == int(6 * face));
+
+    env_cube = rtg.helpers.create_image(
+        VkExtent2D{face, face},
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        Helpers::Unmapped,
+        6, //arrayLayers
+        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT //flags
+    );
+
+    rtg.helpers.transfer_to_cubemap(decoded.data(), decoded.size() * sizeof(float), env_cube);
+
+    {
+        VkImageViewCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = env_cube.handle,
+            .viewType = VK_IMAGE_VIEW_TYPE_CUBE,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .subresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 6,
+            },
+        };
+
+        VK( vkCreateImageView(rtg.device, &create_info, nullptr, &env_cube_view) );
+    }
+    
+    {
+        VkSamplerCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = VK_FILTER_LINEAR,
+            .minFilter = VK_FILTER_LINEAR,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+
+            .anisotropyEnable = VK_FALSE,
+            .maxAnisotropy = 1.0f,
+
+            .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+            .unnormalizedCoordinates = VK_FALSE,
+        };
+
+        VK(vkCreateSampler(rtg.device, &create_info, nullptr, &env_cube_sampler));
+    }
+    
+    diffuse_path = tex->path.substr(0, tex->path.find_last_of('.')) + ".lambertian.png";
+
+    // std::cout << "diffuse path: " << diffuse_path << std::endl;
+}
+
+void MaterialSystem::load_environment_map_diffuse() {
+
+    stbi_set_flip_vertically_on_load(false);
+
+    int w = 0, h = 0, comp = 0;
+    stbi_uc* pixels = stbi_load(diffuse_path.c_str(), &w, &h, &comp, 4);
+    if (!pixels) throw std::runtime_error("Failed to load RGBE cubemap.");
+
+    size_t pixel_count = size_t(w) * size_t(h);
+
+    std::vector<float> decoded(pixel_count * 4);
+
+    for (size_t i = 0; i < pixel_count; ++i) {
+        uint8_t r = pixels[4 * i + 0];
+        uint8_t g = pixels[4 * i + 1];
+        uint8_t b = pixels[4 * i + 2];
+        uint8_t e = pixels[4 * i + 3];
+
+        float* out = &decoded[4 * i];
+        if (e == 0) {
+            out[0] = out[1] = out[2] = 0.0f;
+        } 
+        else {
+            float scale = std::ldexp(1.0f, int(e) - 128);
+            out[0] = scale * float(r + 0.5f) / 256;
+            out[1] = scale * float(g + 0.5f) / 256;
+            out[2] = scale * float(b + 0.5f) / 256;
+            out[3] = 1.0f;
+        }
+    }
+
+    stbi_image_free(pixels);
+    
+    uint32_t face = uint32_t(w);
+    assert(h == int(6 * face));
+
+    diffuse_cube = rtg.helpers.create_image(
+        VkExtent2D{face, face},
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        Helpers::Unmapped,
+        6, //arrayLayers
+        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT //flags
+    );
+
+    rtg.helpers.transfer_to_cubemap(decoded.data(), decoded.size() * sizeof(float), diffuse_cube);
+
+    {
+        VkImageViewCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = diffuse_cube.handle,
+            .viewType = VK_IMAGE_VIEW_TYPE_CUBE,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .subresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 6,
+            },
+        };
+
+        VK( vkCreateImageView(rtg.device, &create_info, nullptr, &diffuse_cube_view) );
+    }
+    
+}
+
