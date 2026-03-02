@@ -102,8 +102,10 @@ struct Tutorial : RTG::Application {
 			struct { float x, y, z, padding_; } SUN_DIRECTION;
 			struct { float r, g, b, padding_; } SUN_ENERGY;
 			struct { float x, y, z, padding_; } EYE;
+			struct { float x, y, z, padding_; } TONE;
+			uint32_t MAX_MIP, padding1_, padding2_, padding3_;
 		};
-		static_assert(sizeof(World) == 4*4 + 4*4 + 4*4 + 4*4 + 4*4, "World is the expected size.");
+		static_assert(sizeof(World) == 7 * 4 * 4, "World is the expected size.");
 
 		struct Transform {
 			mat4 CLIP_FROM_LOCAL;
@@ -114,6 +116,7 @@ struct Tutorial : RTG::Application {
 
 		struct Material {
 			struct { float r, g, b, padding_;} ALBEDO;
+			struct {float ROUGHNESS, METALLIC, padding2_, padding3_;} PBR;
 			uint32_t TYPE, padding1_, padding2_, padding3_;
 		};
 
@@ -246,4 +249,6 @@ struct Tutorial : RTG::Application {
 	std::ofstream perf_log;
 	uint64_t frame_id = 0;
 
+	float exposure_stops = 0.0f; //default 0
+    uint32_t tone_map_op = 0; 
 };

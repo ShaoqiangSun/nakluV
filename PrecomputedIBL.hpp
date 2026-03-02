@@ -8,7 +8,9 @@ struct PrecomputedIBL {
     void load_environment_map(std::string env_cube_in_path);
     void precompute_ibl_diffuse_direct(uint32_t out_face_size = 32, uint32_t src_down_size = 256, std::string env_cube_out_path = "");
 	void precompute_ibl_diffuse_monte_carlo(uint32_t out_face_size = 32, uint32_t samples = 1024, std::string env_cube_out_path = "");
-
+    void precompute_ibl_specular_ggx(uint32_t samples = 1024, std::string env_cube_out_path = "");
+    void precompute_ibl_specular_ggx_mip(uint32_t samples = 1024, std::string env_cube_out_path = "");
+    void precompute_brdf_lut(uint32_t size = 256, uint32_t samples = 1024, std::string out_path = "brdf_lut.png");
 
     std::vector<glm::vec4> env_cube_rgba;
 	uint32_t env_cube_face_size = 0;

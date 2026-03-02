@@ -59,7 +59,7 @@ struct Helpers {
 
 		//NOTE: could define default constructor, move constructor, move assignment, destructor for a bit more paranoia
 	};
-	AllocatedImage create_image(VkExtent2D const &extent, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, MapFlag map = Unmapped, uint32_t arrayLayers = 1, VkImageCreateFlags flags = 0);
+	AllocatedImage create_image(VkExtent2D const &extent, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, MapFlag map = Unmapped, uint32_t arrayLayers = 1, VkImageCreateFlags flags = 0, uint32_t mipLevels = 1);
 	void destroy_image(AllocatedImage &&allocated_image);
 	
 
@@ -70,6 +70,7 @@ struct Helpers {
 	void transfer_to_buffer(void const *data, size_t size, AllocatedBuffer &target);
 	void transfer_to_image(void const *data, size_t size, AllocatedImage &image); //NOTE: image layout after call is VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
 	void transfer_to_cubemap(void const *data, size_t size, AllocatedImage &image);
+	void transfer_to_cubemap_level(void const *data, size_t size, AllocatedImage &image, uint32_t mipLevel);
 
 	VkCommandPool transfer_command_pool = VK_NULL_HANDLE;
 	VkCommandBuffer transfer_command_buffer = VK_NULL_HANDLE;

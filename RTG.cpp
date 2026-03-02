@@ -71,7 +71,17 @@ void RTG::Configuration::parse(int argc, char **argv) {
 			if (argi + 1 >= argc) throw std::runtime_error("--csv-file-name requires a parameter (a file name).");
 			argi += 1;
 			csv_file = argv[argi];
-		} else {
+		} else if (arg == "--exposure") {
+			if (argi + 1 >= argc) throw std::runtime_error("--exposure requires a parameter (float value).");
+			argi += 1;
+			exposure_stops = argv[argi];
+		} else if (arg == "--tone-map") {
+			if (argi + 1 >= argc) throw std::runtime_error("--tone-map requires a parameter (linear|reinhard).");
+			argi += 1;
+			tone_mapping_mode = argv[argi];
+		}
+		
+		else {
 			throw std::runtime_error("Unrecognized argument '" + arg + "'.");
 		}
 	}

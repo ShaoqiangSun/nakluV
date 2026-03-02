@@ -84,6 +84,8 @@ struct RTG {
 		std::string test_mode = "";
 		std::string cpu_test_culled_count = "";
 		std::string csv_file = "";
+		std::string exposure_stops = "";
+		std::string tone_mapping_mode = "";
 
 		//for configuration construction + management:
 		Configuration() = default;

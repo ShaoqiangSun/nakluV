@@ -11,6 +11,7 @@
 #include <iostream>
 
 #include "SceneViewer.hpp"
+#include <filesystem>
 
 
 static inline glm::mat4 to_glm(mat4 const& m) {
@@ -109,6 +110,11 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 			material_system.load_environment_map(scene_viewer->s72);
 			material_system.load_environment_map_diffuse();
 
+			std::filesystem::path scene_path = rtg.configuration.scene_file;
+			std::filesystem::path scene_dir  = scene_path.parent_path();
+			std::filesystem::path brdf_path = scene_dir / "brdf_lut.raw";
+			material_system.load_brdf_lut(brdf_path.string(), 256);
+
 
 			if (!rtg.configuration.camera_name.empty()) {
 				if (scene_viewer->s72.cameras.count(rtg.configuration.camera_name) == 0) {
@@ -126,6 +132,19 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				else throw std::runtime_error(
 					"Culling mode '" + rtg.configuration.culling_mode + "' is incorrect."
 				);
+			}
+
+			if (!rtg.configuration.exposure_stops.empty()) {
+				exposure_stops = std::stof(rtg.configuration.exposure_stops);
+			}
+
+			if (!rtg.configuration.tone_mapping_mode.empty()) {
+
+				if (rtg.configuration.tone_mapping_mode == "linear") {
+					tone_map_op = 0;
+				} else if (rtg.configuration.tone_mapping_mode == "reinhard") {
+					tone_map_op = 1;
+				}
 			}
 
 		}
@@ -246,56 +265,70 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 	lines_pipeline.create(rtg, render_pass, 0);
 	objects_pipeline.create(rtg, render_pass, 0);
 
-	// { //make image views for the textures
-	// 	material_system.texture_views.reserve(material_system.textures.size());
-	// 	for (Helpers::AllocatedImage const &image : material_system.textures) {
-	// 		VkImageViewCreateInfo create_info{
-	// 			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-	// 			.flags = 0,
-	// 			.image = image.handle,
-	// 			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-	// 			.format = image.format,
-	// 			// .components sets swizzling and is fine when zero-initialized
-	// 			.subresourceRange{
-	// 				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-	// 				.baseMipLevel = 0,
-	// 				.levelCount = 1,
-	// 				.baseArrayLayer = 0,
-	// 				.layerCount = 1,
-	// 			},
-	// 		};
+	{ //make image views for the textures
+		material_system.texture_views.reserve(material_system.textures.size());
+		for (Helpers::AllocatedImage const &image : material_system.textures) {
+			VkImageViewCreateInfo create_info{
+				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+				.flags = 0,
+				.image = image.handle,
+				.viewType = VK_IMAGE_VIEW_TYPE_2D,
+				.format = image.format,
+				// .components sets swizzling and is fine when zero-initialized
+				.subresourceRange{
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.baseMipLevel = 0,
+					.levelCount = 1,
+					.baseArrayLayer = 0,
+					.layerCount = 1,
+				},
+			};
 
-	// 		VkImageView image_view = VK_NULL_HANDLE;
-	// 		VK( vkCreateImageView(rtg.device, &create_info, nullptr, &image_view) );
+			VkImageView image_view = VK_NULL_HANDLE;
+			VK( vkCreateImageView(rtg.device, &create_info, nullptr, &image_view) );
 
-	// 		material_system.texture_views.emplace_back(image_view);
-	// 	}
-	// 	assert(material_system.texture_views.size() == material_system.textures.size());
+			material_system.texture_views.emplace_back(image_view);
+		}
+		assert(material_system.texture_views.size() == material_system.textures.size());
 
-	// }
+		// VkImageViewCreateInfo create_info{
+		// 	.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		// 	.image = material_system.brdf_lut.handle,
+		// 	.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		// 	.format = VK_FORMAT_R16G16_UNORM,
+		// 	.subresourceRange{
+		// 		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+		// 		.baseMipLevel = 0,
+		// 		.levelCount = 1,
+		// 		.baseArrayLayer = 0,
+		// 		.layerCount = 1,
+		// 	}
+		// };
+		// VK( vkCreateImageView(rtg.device, &create_info, nullptr, &material_system.brdf_lut_view) );
+	}
 
-	// { // make a sampler for the textures
-	// 	VkSamplerCreateInfo create_info{
-	// 		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-	// 		.flags = 0,
-	// 		.magFilter = VK_FILTER_NEAREST,
-	// 		.minFilter = VK_FILTER_NEAREST,
-	// 		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-	// 		.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-	// 		.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-	// 		.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-	// 		.mipLodBias = 0.0f,
-	// 		.anisotropyEnable = VK_FALSE,
-	// 		.maxAnisotropy = 0.0f, //doesn't matter if anisotropy isn't enabled
-	// 		.compareEnable = VK_FALSE,
-	// 		.compareOp = VK_COMPARE_OP_ALWAYS, //doesn't matter if compare isn't enabled
-	// 		.minLod = 0.0f,
-	// 		.maxLod = 0.0f,
-	// 		.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
-	// 		.unnormalizedCoordinates = VK_FALSE,
-	// 	};
-	// 	VK( vkCreateSampler(rtg.device, &create_info, nullptr, &material_system.texture_sampler) );
-	// }
+	{ // make a sampler for the textures
+		VkSamplerCreateInfo create_info{
+			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+			.flags = 0,
+			.magFilter = VK_FILTER_NEAREST,
+			.minFilter = VK_FILTER_NEAREST,
+			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+			.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.mipLodBias = 0.0f,
+			.anisotropyEnable = VK_FALSE,
+			.maxAnisotropy = 0.0f, //doesn't matter if anisotropy isn't enabled
+			.compareEnable = VK_FALSE,
+			.compareOp = VK_COMPARE_OP_ALWAYS, //doesn't matter if compare isn't enabled
+			.minLod = 0.0f,
+			.maxLod = 0.0f,
+			.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+			.unnormalizedCoordinates = VK_FALSE,
+		};
+		VK( vkCreateSampler(rtg.device, &create_info, nullptr, &material_system.texture_sampler) );
+	}
 	
 
 	{ //create descriptor pool:
@@ -427,7 +460,13 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			};
 
-			std::array< VkWriteDescriptorSet, 4 > writes {
+			VkDescriptorImageInfo Brdf_Lut_info{
+				.sampler = material_system.texture_sampler,
+				.imageView = material_system.brdf_lut_view,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+
+			std::array< VkWriteDescriptorSet, 5 > writes {
 				VkWriteDescriptorSet{
 					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 					.dstSet = workspace.Camera_descriptors,
@@ -463,6 +502,15 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 					.descriptorCount = 1,
 					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 					.pImageInfo = &Env_Diffuse_info,
+				},
+				VkWriteDescriptorSet{
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = workspace.World_descriptors,
+					.dstBinding = 3,
+					.dstArrayElement = 0,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.pImageInfo = &Brdf_Lut_info,
 				},
 			};
 
@@ -513,56 +561,70 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 	}
 
 
-	{ //make image views for the textures
-		material_system.texture_views.reserve(material_system.textures.size());
-		for (Helpers::AllocatedImage const &image : material_system.textures) {
-			VkImageViewCreateInfo create_info{
-				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-				.flags = 0,
-				.image = image.handle,
-				.viewType = VK_IMAGE_VIEW_TYPE_2D,
-				.format = image.format,
-				// .components sets swizzling and is fine when zero-initialized
-				.subresourceRange{
-					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-					.baseMipLevel = 0,
-					.levelCount = 1,
-					.baseArrayLayer = 0,
-					.layerCount = 1,
-				},
-			};
+	// { //make image views for the textures
+	// 	material_system.texture_views.reserve(material_system.textures.size());
+	// 	for (Helpers::AllocatedImage const &image : material_system.textures) {
+	// 		VkImageViewCreateInfo create_info{
+	// 			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+	// 			.flags = 0,
+	// 			.image = image.handle,
+	// 			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+	// 			.format = image.format,
+	// 			// .components sets swizzling and is fine when zero-initialized
+	// 			.subresourceRange{
+	// 				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+	// 				.baseMipLevel = 0,
+	// 				.levelCount = 1,
+	// 				.baseArrayLayer = 0,
+	// 				.layerCount = 1,
+	// 			},
+	// 		};
 
-			VkImageView image_view = VK_NULL_HANDLE;
-			VK( vkCreateImageView(rtg.device, &create_info, nullptr, &image_view) );
+	// 		VkImageView image_view = VK_NULL_HANDLE;
+	// 		VK( vkCreateImageView(rtg.device, &create_info, nullptr, &image_view) );
 
-			material_system.texture_views.emplace_back(image_view);
-		}
-		assert(material_system.texture_views.size() == material_system.textures.size());
+	// 		material_system.texture_views.emplace_back(image_view);
+	// 	}
+	// 	assert(material_system.texture_views.size() == material_system.textures.size());
 
-	}
+	// 	VkImageViewCreateInfo create_info{
+	// 		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+	// 		.image = material_system.brdf_lut.handle,
+	// 		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+	// 		.format = VK_FORMAT_R16G16_UNORM,
+	// 		.subresourceRange{
+	// 			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+	// 			.baseMipLevel = 0,
+	// 			.levelCount = 1,
+	// 			.baseArrayLayer = 0,
+	// 			.layerCount = 1,
+	// 		}
+	// 	};
+	// 	VK( vkCreateImageView(rtg.device, &create_info, nullptr, &material_system.brdf_lut_view) );
+	// }
 
-	{ // make a sampler for the textures
-		VkSamplerCreateInfo create_info{
-			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-			.flags = 0,
-			.magFilter = VK_FILTER_NEAREST,
-			.minFilter = VK_FILTER_NEAREST,
-			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-			.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-			.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-			.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-			.mipLodBias = 0.0f,
-			.anisotropyEnable = VK_FALSE,
-			.maxAnisotropy = 0.0f, //doesn't matter if anisotropy isn't enabled
-			.compareEnable = VK_FALSE,
-			.compareOp = VK_COMPARE_OP_ALWAYS, //doesn't matter if compare isn't enabled
-			.minLod = 0.0f,
-			.maxLod = 0.0f,
-			.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
-			.unnormalizedCoordinates = VK_FALSE,
-		};
-		VK( vkCreateSampler(rtg.device, &create_info, nullptr, &material_system.texture_sampler) );
-	}
+	// { // make a sampler for the textures
+	// 	VkSamplerCreateInfo create_info{
+	// 		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+	// 		.flags = 0,
+	// 		.magFilter = VK_FILTER_NEAREST,
+	// 		.minFilter = VK_FILTER_NEAREST,
+	// 		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+	// 		.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+	// 		.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+	// 		.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+	// 		.mipLodBias = 0.0f,
+	// 		.anisotropyEnable = VK_FALSE,
+	// 		.maxAnisotropy = 0.0f, //doesn't matter if anisotropy isn't enabled
+	// 		.compareEnable = VK_FALSE,
+	// 		.compareOp = VK_COMPARE_OP_ALWAYS, //doesn't matter if compare isn't enabled
+	// 		.minLod = 0.0f,
+	// 		.maxLod = 0.0f,
+	// 		.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+	// 		.unnormalizedCoordinates = VK_FALSE,
+	// 	};
+	// 	VK( vkCreateSampler(rtg.device, &create_info, nullptr, &material_system.texture_sampler) );
+	// }
 		
 	{ // create the material descriptor pool
 		uint32_t per_material = uint32_t(material_system.material_params.size()); //for easier-to-read counting
@@ -574,7 +636,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 			},
 			VkDescriptorPoolSize{
 				.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-				.descriptorCount = 1 * 1 * per_material, //one descriptor per set, one set per texture
+				.descriptorCount = 5 * 1 * per_material, //one descriptor per set, one set per texture
 			},
 		};
 
@@ -607,7 +669,12 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		size_t N = material_system.material_descriptors.size();
 		std::vector<VkDescriptorBufferInfo> material_params_infos(N);
 		std::vector<VkDescriptorImageInfo> albedo_infos(N);
-		writes.reserve(N * 2);
+		std::vector<VkDescriptorImageInfo> roughness_infos(N);
+		std::vector<VkDescriptorImageInfo> metallic_infos(N);
+		std::vector<VkDescriptorImageInfo> normal_infos(N);
+		std::vector<VkDescriptorImageInfo> displacement_infos(N);
+
+		writes.reserve(N * 6);
 
 		for (size_t i = 0; i < N; ++i) {
 			material_params_infos[i] = VkDescriptorBufferInfo{
@@ -626,13 +693,30 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 					.pBufferInfo = &material_params_infos[i],
 			});
 
-			uint32_t tex_index = material_system.material_tex_info[i].has_albedo_tex ? material_system.material_tex_info[i].albedo_tex_index : material_system.default_texture_index;
 
+			uint32_t albedo_index = material_system.material_tex_info[i].has_albedo_tex
+				? material_system.material_tex_info[i].albedo_tex_index
+				: material_system.default_albedo_texture_index;
+
+			uint32_t rough_index = material_system.material_tex_info[i].has_roughness_tex
+				? material_system.material_tex_info[i].roughness_tex_index
+				: material_system.default_roughness_texture_index;
+
+			uint32_t metal_index = material_system.material_tex_info[i].has_metallic_tex
+				? material_system.material_tex_info[i].metallic_tex_index
+				: material_system.default_metallic_texture_index;
+
+			uint32_t normal_index = material_system.material_tex_info[i].has_normal_tex
+				? material_system.material_tex_info[i].normal_tex_index
+				: material_system.default_normal_texture_index;
 			
+			uint32_t disp_index = material_system.material_tex_info[i].has_displacement_tex
+				? material_system.material_tex_info[i].displacement_tex_index
+				: material_system.default_displacement_texture_index;
 
 			albedo_infos[i] = VkDescriptorImageInfo{
 				.sampler = material_system.texture_sampler,
-				.imageView = material_system.texture_views[tex_index],
+				.imageView = material_system.texture_views[albedo_index],
 				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			};
 
@@ -644,6 +728,70 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				.descriptorCount = 1,
 				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 				.pImageInfo = &albedo_infos[i],
+			});
+
+			roughness_infos[i] = VkDescriptorImageInfo{
+				.sampler = material_system.texture_sampler,
+				.imageView = material_system.texture_views[rough_index],
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+
+			writes.push_back(VkWriteDescriptorSet{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = material_system.material_descriptors[i],
+				.dstBinding = 2,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &roughness_infos[i],
+			});
+
+			metallic_infos[i] = VkDescriptorImageInfo{
+				.sampler = material_system.texture_sampler,
+				.imageView = material_system.texture_views[metal_index],
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+
+			writes.push_back(VkWriteDescriptorSet{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = material_system.material_descriptors[i],
+				.dstBinding = 3,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &metallic_infos[i],
+			});
+
+			normal_infos[i] = VkDescriptorImageInfo{
+				.sampler = material_system.texture_sampler,
+				.imageView = material_system.texture_views[normal_index],
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+
+			writes.push_back(VkWriteDescriptorSet{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = material_system.material_descriptors[i],
+				.dstBinding = 4,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &normal_infos[i],
+			});
+
+			displacement_infos[i] = VkDescriptorImageInfo{
+				.sampler = material_system.texture_sampler,
+				.imageView = material_system.texture_views[disp_index],
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+
+			writes.push_back(VkWriteDescriptorSet{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = material_system.material_descriptors[i],
+				.dstBinding = 5,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &displacement_infos[i],
 			});
 		}
 
@@ -1465,6 +1613,13 @@ void Tutorial::update(float dt) {
 	scene_viewer->world.EYE.x = eye.x;
 	scene_viewer->world.EYE.y = eye.y;
 	scene_viewer->world.EYE.z = eye.z;
+
+	scene_viewer->world.TONE.x = exposure_stops;
+	scene_viewer->world.TONE.y = float(tone_map_op);
+	scene_viewer->world.TONE.z = 0.0f;
+	scene_viewer->world.TONE.padding_ = 0.0f;
+
+	scene_viewer->world.MAX_MIP = material_system.env_specular_max_mip;
 
 	scene_viewer->update_object_instances_camera(CLIP_FROM_WORLD);
 
