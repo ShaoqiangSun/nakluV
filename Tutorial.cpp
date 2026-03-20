@@ -107,8 +107,17 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 			
 			material_system.build_material_texture(scene_viewer->s72);
 			material_system.load_all_textures();
-			material_system.load_environment_map(scene_viewer->s72);
-			material_system.load_environment_map_diffuse();
+
+			// material_system.load_environment_map(scene_viewer->s72);
+			// material_system.load_environment_map_diffuse();
+
+			if (!scene_viewer->s72.environments.empty()) {
+				material_system.load_environment_map(scene_viewer->s72);
+				material_system.load_environment_map_diffuse();
+			} else {
+				material_system.create_default_environment_map();
+				material_system.create_default_environment_diffuse();
+			}
 
 			std::filesystem::path scene_path = rtg.configuration.scene_file;
 			std::filesystem::path scene_dir  = scene_path.parent_path();

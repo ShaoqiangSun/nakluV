@@ -567,3 +567,131 @@ void MaterialSystem::load_brdf_lut(std::string const& path, uint32_t size) {
     };
     VK( vkCreateImageView(rtg.device, &view, nullptr, &brdf_lut_view) );
 }
+
+void MaterialSystem::create_default_environment_map() {
+    // 1x1 black cubemap, 6 faces, RGBA32F
+    constexpr uint32_t face = 1;
+    constexpr uint32_t mip_levels = 1;
+
+    const std::array<float, 6 * 4> gray_faces = {
+        0.3f, 0.3f, 0.3f, 1.0f, // +X
+        0.3f, 0.3f, 0.3f, 1.0f, // -X
+        0.3f, 0.3f, 0.3f, 1.0f, // +Y
+        0.3f, 0.3f, 0.3f, 1.0f, // -Y
+        0.3f, 0.3f, 0.3f, 1.0f, // +Z
+        0.3f, 0.3f, 0.3f, 1.0f  // -Z
+    };
+
+    env_specular_max_mip = 0;
+
+    env_cube = rtg.helpers.create_image(
+        VkExtent2D{face, face},
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        Helpers::Unmapped,
+        6, // arrayLayers
+        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, // flags
+        mip_levels
+    );
+
+    rtg.helpers.transfer_to_cubemap(
+        gray_faces.data(),
+        gray_faces.size() * sizeof(float),
+        env_cube
+    );
+
+    {
+        VkImageViewCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = env_cube.handle,
+            .viewType = VK_IMAGE_VIEW_TYPE_CUBE,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .subresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = mip_levels,
+                .baseArrayLayer = 0,
+                .layerCount = 6,
+            },
+        };
+
+        VK(vkCreateImageView(rtg.device, &create_info, nullptr, &env_cube_view));
+    }
+
+    if (env_cube_sampler == VK_NULL_HANDLE) {
+        VkSamplerCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = VK_FILTER_LINEAR,
+            .minFilter = VK_FILTER_LINEAR,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+
+            .anisotropyEnable = VK_FALSE,
+            .maxAnisotropy = 1.0f,
+
+            .minLod = 0.0f,
+            .maxLod = 0.0f,
+
+            .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+            .unnormalizedCoordinates = VK_FALSE,
+        };
+
+        VK(vkCreateSampler(rtg.device, &create_info, nullptr, &env_cube_sampler));
+    }
+
+    diffuse_path.clear();
+}
+
+void MaterialSystem::create_default_environment_diffuse() {
+    constexpr uint32_t face = 1;
+
+    const std::array<float, 6 * 4> gray_faces = {
+        0.3f, 0.3f, 0.3f, 1.0f, // +X
+        0.3f, 0.3f, 0.3f, 1.0f, // -X
+        0.3f, 0.3f, 0.3f, 1.0f, // +Y
+        0.3f, 0.3f, 0.3f, 1.0f, // -Y
+        0.3f, 0.3f, 0.3f, 1.0f, // +Z
+        0.3f, 0.3f, 0.3f, 1.0f  // -Z
+    };
+
+    diffuse_cube = rtg.helpers.create_image(
+        VkExtent2D{face, face},
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        Helpers::Unmapped,
+        6, // arrayLayers
+        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT // flags
+    );
+
+    rtg.helpers.transfer_to_cubemap(
+        gray_faces.data(),
+        gray_faces.size() * sizeof(float),
+        diffuse_cube
+    );
+
+    {
+        VkImageViewCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = diffuse_cube.handle,
+            .viewType = VK_IMAGE_VIEW_TYPE_CUBE,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .subresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 6,
+            },
+        };
+
+        VK(vkCreateImageView(rtg.device, &create_info, nullptr, &diffuse_cube_view));
+    }
+
+}

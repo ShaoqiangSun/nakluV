@@ -1,5 +1,6 @@
 #include "PrecomputedIBL.hpp"
 #include <string>
+#include <iostream>
 
 
 int main(int argc, char **argv) {
@@ -41,6 +42,23 @@ int main(int argc, char **argv) {
     if (!ggx_out_file.empty()) pre_ibl.precompute_ibl_specular_ggx_mip(1024, ggx_out_file);
     if (!brdf_out_file.empty()) pre_ibl.precompute_brdf_lut(256, 1024, brdf_out_file);
 
+
+    // std::vector<uint32_t> sizes = {4, 8, 16, 32, 64};
+
+    // std::cout << "===== Lambertian Timing =====" << std::endl;
+
+    // for (uint32_t size : sizes) {
+
+    //     auto start = std::chrono::high_resolution_clock::now();
+
+    //     pre_ibl.precompute_ibl_diffuse_direct(size, size * 4, "");
+
+    //     auto end = std::chrono::high_resolution_clock::now();
+
+    //     float time_ms = std::chrono::duration<float, std::milli>(end - start).count();
+
+    //     std::cout << "Size: " << size << "  Time: " << time_ms << " ms" << std::endl;
+    // }
 
     return 0;
 }

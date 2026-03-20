@@ -39,6 +39,8 @@ struct MaterialSystem {
 	void load_environment_map(S72 const &s72);
 	void load_environment_map_diffuse();
 	void load_brdf_lut(std::string const& path, uint32_t size);
+	void create_default_environment_map();
+	void create_default_environment_diffuse();
 	
 
 	RTG &rtg;
@@ -59,7 +61,7 @@ struct MaterialSystem {
 	std::vector< Helpers::AllocatedImage > textures;
 	std::vector< VkImageView > texture_views;
 	Helpers::AllocatedImage env_cube;
-	VkImageView env_cube_view;
+	VkImageView env_cube_view = VK_NULL_HANDLE;
 
 	VkSampler texture_sampler = VK_NULL_HANDLE;
 	VkSampler env_cube_sampler = VK_NULL_HANDLE;

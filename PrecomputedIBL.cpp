@@ -11,6 +11,9 @@
 #include <fstream>
 #include <filesystem>
 
+#include <chrono>
+#include <iostream>
+
 static inline glm::vec3 face_uv_to_dir(int face, float u, float v) {
     float a = 2.0f * u - 1.0f;
     float b = 2.0f * v - 1.0f;
@@ -515,7 +518,12 @@ void PrecomputedIBL::precompute_ibl_specular_ggx_mip(uint32_t samples, std::stri
         return (1.0f - t) * c0 + t * c1;
     };
 
+    std::cout << "===== GGX Timing Per Mip =====" << std::endl;
+
     for (uint32_t mip = 1; mip <= max_mip; ++mip) {
+
+        auto mip_start = std::chrono::high_resolution_clock::now();
+
         uint32_t out_face_size = base >> mip;
 
         float roughness = float(mip) / float(max_mip);
@@ -591,6 +599,16 @@ void PrecomputedIBL::precompute_ibl_specular_ggx_mip(uint32_t samples, std::stri
         std::string path = make_mip_path(base_out, mip);
 
         stbi_write_png(path.c_str(), int(out_face_size), int(out_face_size * 6), 4, out.data(), int(out_face_size * 4));
+
+        auto mip_end = std::chrono::high_resolution_clock::now();
+        float mip_ms = std::chrono::duration<float, std::milli>(mip_end - mip_start).count();
+
+        std::cout
+            << "Mip: " << mip
+            << "  FaceSize: " << out_face_size
+            << "  Roughness: " << roughness
+            << "  Time: " << mip_ms << " ms"
+            << std::endl;
     }
 }
 
