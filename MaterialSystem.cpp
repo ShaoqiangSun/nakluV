@@ -573,13 +573,22 @@ void MaterialSystem::create_default_environment_map() {
     constexpr uint32_t face = 1;
     constexpr uint32_t mip_levels = 1;
 
+    // const std::array<float, 6 * 4> gray_faces = {
+    //     0.3f, 0.3f, 0.3f, 1.0f, // +X
+    //     0.3f, 0.3f, 0.3f, 1.0f, // -X
+    //     0.3f, 0.3f, 0.3f, 1.0f, // +Y
+    //     0.3f, 0.3f, 0.3f, 1.0f, // -Y
+    //     0.3f, 0.3f, 0.3f, 1.0f, // +Z
+    //     0.3f, 0.3f, 0.3f, 1.0f  // -Z
+    // };
+
     const std::array<float, 6 * 4> gray_faces = {
-        0.3f, 0.3f, 0.3f, 1.0f, // +X
-        0.3f, 0.3f, 0.3f, 1.0f, // -X
-        0.3f, 0.3f, 0.3f, 1.0f, // +Y
-        0.3f, 0.3f, 0.3f, 1.0f, // -Y
-        0.3f, 0.3f, 0.3f, 1.0f, // +Z
-        0.3f, 0.3f, 0.3f, 1.0f  // -Z
+        0.0f, 0.0f, 0.0f, 1.0f, // +X
+        0.0f, 0.0f, 0.0f, 1.0f, // -X
+        0.0f, 0.0f, 0.0f, 1.0f, // +Y
+        0.0f, 0.0f, 0.0f, 1.0f, // -Y
+        0.0f, 0.0f, 0.0f, 1.0f, // +Z
+        0.0f, 0.0f, 0.0f, 1.0f  // -Z
     };
 
     env_specular_max_mip = 0;
@@ -650,13 +659,22 @@ void MaterialSystem::create_default_environment_map() {
 void MaterialSystem::create_default_environment_diffuse() {
     constexpr uint32_t face = 1;
 
+    // const std::array<float, 6 * 4> gray_faces = {
+    //     0.3f, 0.3f, 0.3f, 1.0f, // +X
+    //     0.3f, 0.3f, 0.3f, 1.0f, // -X
+    //     0.3f, 0.3f, 0.3f, 1.0f, // +Y
+    //     0.3f, 0.3f, 0.3f, 1.0f, // -Y
+    //     0.3f, 0.3f, 0.3f, 1.0f, // +Z
+    //     0.3f, 0.3f, 0.3f, 1.0f  // -Z
+    // };
+
     const std::array<float, 6 * 4> gray_faces = {
-        0.3f, 0.3f, 0.3f, 1.0f, // +X
-        0.3f, 0.3f, 0.3f, 1.0f, // -X
-        0.3f, 0.3f, 0.3f, 1.0f, // +Y
-        0.3f, 0.3f, 0.3f, 1.0f, // -Y
-        0.3f, 0.3f, 0.3f, 1.0f, // +Z
-        0.3f, 0.3f, 0.3f, 1.0f  // -Z
+        0.0f, 0.0f, 0.0f, 1.0f, // +X
+        0.0f, 0.0f, 0.0f, 1.0f, // -X
+        0.0f, 0.0f, 0.0f, 1.0f, // +Y
+        0.0f, 0.0f, 0.0f, 1.0f, // -Y
+        0.0f, 0.0f, 0.0f, 1.0f, // +Z
+        0.0f, 0.0f, 0.0f, 1.0f  // -Z
     };
 
     diffuse_cube = rtg.helpers.create_image(

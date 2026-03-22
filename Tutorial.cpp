@@ -860,6 +860,14 @@ Tutorial::~Tutorial() {
 			rtg.helpers.destroy_buffer(std::move(workspace.Transforms));
 		}
 		//Transforms_descriptors freed when pool is destroyed.
+
+		if (workspace.Lights_src.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.Lights_src));
+		}
+		if (workspace.Lights.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.Lights));
+		}
+		//Lights_descriptors freed when pool is destroyed.
 	}
 	workspaces.clear();
 
@@ -1194,6 +1202,122 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			.size = needed_bytes,
 		};
 		vkCmdCopyBuffer(workspace.command_buffer, workspace.Transforms_src.handle, workspace.Transforms.handle, 1, &copy_region);
+	}
+
+	if (!scene_viewer->lights.empty()) { //upload lights:
+		std::vector<ObjectsPipeline::Light> gpu_lights;
+		gpu_lights.reserve(scene_viewer->lights.size());
+
+		for (auto const& l : scene_viewer->lights) {
+			ObjectsPipeline::Light out{};
+
+			out.POSITION_TYPE[0] = l.position.x;
+			out.POSITION_TYPE[1] = l.position.y;
+			out.POSITION_TYPE[2] = l.position.z;
+			out.POSITION_TYPE[3] = float(l.type); // 0=sun, 1=sphere, 2=spot
+
+			out.DIRECTION_SHADOW[0] = l.direction.x;
+			out.DIRECTION_SHADOW[1] = l.direction.y;
+			out.DIRECTION_SHADOW[2] = l.direction.z;
+			out.DIRECTION_SHADOW[3] = float(l.shadow);
+
+			out.TINT_STRENGTH[0] = l.tint.r;
+			out.TINT_STRENGTH[1] = l.tint.g;
+			out.TINT_STRENGTH[2] = l.tint.b;
+
+			if (l.type == SceneViewer::LightInfo::Type::Sun) {
+				out.TINT_STRENGTH[3] = l.strength;
+
+				out.PARAMS[0] = l.angle;   // x
+				out.PARAMS[1] = 0.0f;      // y
+				out.PARAMS[2] = 0.0f;      // z
+				out.PARAMS[3] = 0.0f;      // w
+
+			} else if (l.type == SceneViewer::LightInfo::Type::Sphere) {
+				out.TINT_STRENGTH[3] = l.power;
+
+				out.PARAMS[0] = l.radius;
+				out.PARAMS[1] = l.limit;
+				out.PARAMS[2] = 0.0f;
+				out.PARAMS[3] = 0.0f;
+
+			} else { // spot
+				out.TINT_STRENGTH[3] = l.power;
+
+				out.PARAMS[0] = l.radius;
+				out.PARAMS[1] = l.limit;
+				out.PARAMS[2] = l.fov;
+				out.PARAMS[3] = l.blend;
+			}
+
+			gpu_lights.push_back(out);
+		}
+
+		size_t needed_bytes = gpu_lights.size() * sizeof(ObjectsPipeline::Light);
+
+		if (workspace.Lights_src.handle == VK_NULL_HANDLE || workspace.Lights_src.size < needed_bytes) {
+			size_t new_bytes = ((needed_bytes + 4096) / 4096) * 4096;
+
+			if (workspace.Lights_src.handle) {
+				rtg.helpers.destroy_buffer(std::move(workspace.Lights_src));
+			}
+			if (workspace.Lights.handle) {
+				rtg.helpers.destroy_buffer(std::move(workspace.Lights));
+			}
+
+			workspace.Lights_src = rtg.helpers.create_buffer(
+				new_bytes,
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				Helpers::Mapped
+			);
+
+			workspace.Lights = rtg.helpers.create_buffer(
+				new_bytes,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+
+			VkDescriptorBufferInfo lights_info{
+				.buffer = workspace.Lights.handle,
+				.offset = 0,
+				.range = workspace.Lights.size,
+			};
+
+			VkWriteDescriptorSet write{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = workspace.World_descriptors,   // set0_World
+				.dstBinding = 4,                         // lights binding
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.pBufferInfo = &lights_info,
+			};
+
+			vkUpdateDescriptorSets(rtg.device, 1, &write, 0, nullptr);
+		}
+
+		if (!gpu_lights.empty()) {
+			assert(workspace.Lights_src.allocation.mapped);
+			std::memcpy(workspace.Lights_src.allocation.data(),
+						gpu_lights.data(),
+						needed_bytes);
+
+			VkBufferCopy copy_region{
+				.srcOffset = 0,
+				.dstOffset = 0,
+				.size = needed_bytes,
+			};
+
+			vkCmdCopyBuffer(workspace.command_buffer,
+							workspace.Lights_src.handle,
+							workspace.Lights.handle,
+							1,
+							&copy_region);
+		}
+
+		scene_viewer->world.LIGHT_COUNT = uint32_t(scene_viewer->lights.size());
 	}
 
 

@@ -333,33 +333,60 @@ void SceneViewer::traverse_node(S72::Node* node, glm::mat4 const& parent, bool i
 	}
 
 	if (node->light != nullptr) {
+
+		LightInfo light_info{};
+		light_info.shadow = node->light->shadow;
+		light_info.tint = glm::vec3(node->light->tint.r, node->light->tint.g, node->light->tint.b);
+		
+
+		glm::vec3 world_pos = glm::vec3(world_glm * glm::vec4(0, 0, 0, 1));
+		glm::vec3 world_dir = -glm::normalize(glm::vec3(world_glm * glm::vec4(0, 0, -1, 0)));
+
 		if (std::holds_alternative<S72::Light::Sun>(node->light->source)) {
 			auto const& sun = std::get<S72::Light::Sun>(node->light->source);
+			light_info.type = LightInfo::Type::Sun;
+			light_info.direction = world_dir;
+			light_info.angle = sun.angle;
+			light_info.strength = sun.strength;
 
-			glm::vec3 light_dir = -glm::normalize(glm::vec3(world_glm * glm::vec4(0,0,-1,0)));
 			if (sun.angle < 1e-4f) {
-				world.SUN_DIRECTION.x = light_dir.x;
-				world.SUN_DIRECTION.y = light_dir.y;
-				world.SUN_DIRECTION.z = light_dir.z;
-				world.SUN_ENERGY.r = node->light->tint.r * sun.strength;
-				world.SUN_ENERGY.g = node->light->tint.g * sun.strength;
-				world.SUN_ENERGY.b = node->light->tint.b * sun.strength;
-				// world.SUN_ENERGY.r = 0.0f;
-				// world.SUN_ENERGY.g = 0.0f;
-				// world.SUN_ENERGY.b = 0.0f;
+				world.SUN_DIRECTION.x = world_dir.x;
+				world.SUN_DIRECTION.y = world_dir.y;
+				world.SUN_DIRECTION.z = world_dir.z;
+				world.SUN_ENERGY.r = light_info.tint.r * sun.strength;
+				world.SUN_ENERGY.g = light_info.tint.g * sun.strength;
+				world.SUN_ENERGY.b = light_info.tint.b * sun.strength;
 			}
 			if (sun.angle > 3.14f) {
-				world.SKY_DIRECTION.x = light_dir.x;
-				world.SKY_DIRECTION.y = light_dir.y;
-				world.SKY_DIRECTION.z = light_dir.z;
-				world.SKY_ENERGY.r = node->light->tint.r * sun.strength;
-				world.SKY_ENERGY.g = node->light->tint.g * sun.strength;
-				world.SKY_ENERGY.b = node->light->tint.b * sun.strength;
-				// world.SKY_ENERGY.r = 0.0f;
-				// world.SKY_ENERGY.g = 0.0f;
-				// world.SKY_ENERGY.b = 0.0f;
+				world.SKY_DIRECTION.x = world_dir.x;
+				world.SKY_DIRECTION.y = world_dir.y;
+				world.SKY_DIRECTION.z = world_dir.z;
+				world.SKY_ENERGY.r = light_info.tint.r * sun.strength;
+				world.SKY_ENERGY.g = light_info.tint.g * sun.strength;
+				world.SKY_ENERGY.b = light_info.tint.b * sun.strength;
 			}
 		}
+		else if (std::holds_alternative<S72::Light::Sphere>(node->light->source)) {
+			auto const& sphere = std::get<S72::Light::Sphere>(node->light->source);
+			light_info.type = LightInfo::Type::Sphere;
+			light_info.position = world_pos;
+			light_info.radius = sphere.radius;
+			light_info.power = sphere.power;
+			light_info.limit = sphere.limit;
+		}
+		else if (std::holds_alternative<S72::Light::Spot>(node->light->source)) {
+			auto const& spot = std::get<S72::Light::Spot>(node->light->source);
+			light_info.type = LightInfo::Type::Spot;
+			light_info.position = world_pos;
+			light_info.direction = world_dir;
+			light_info.radius = spot.radius;
+			light_info.power = spot.power;
+			light_info.limit = spot.limit;
+			light_info.fov = spot.fov;
+			light_info.blend = spot.blend;
+		}
+
+		lights.push_back(light_info);
 	}
 
 	if (node->camera != nullptr) {

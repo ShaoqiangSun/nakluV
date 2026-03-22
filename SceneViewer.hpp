@@ -39,6 +39,32 @@ struct SceneViewer {
 		uint32_t material = 0;
 	};
 
+	struct LightInfo {
+		enum class Type : uint32_t {
+            Sun = 0,
+            Sphere = 1,
+            Spot = 2,
+        };
+
+        Type type;
+
+        uint32_t shadow = 0;
+
+        glm::vec3 position = glm::vec3(0.0f);   // sphere / spot
+        glm::vec3 direction = glm::vec3(0.0f);  // sun / spot
+        glm::vec3 tint = glm::vec3(1.0f);
+
+        float angle = 0.0f;     // sun
+        float strength = 0.0f;  // sun
+
+        float radius = 0.0f;    // sphere / spot
+        float power = 0.0f;     // sphere / spot
+        float limit = std::numeric_limits<float>::infinity(); // sphere / spot
+
+        float fov = 0.0f;       // spot
+        float blend = 0.0f;     // spot
+	};
+
     bool aabb_intersects_frustum(AABB const &box_target_space, glm::mat4 const& transform_matrix);
 
     void load_mesh_vertices(std::vector< PosNorTanTexVertex > &vertices_pool);
@@ -89,4 +115,6 @@ struct SceneViewer {
     std::vector<uint32_t> bvh_indices;
 	std::vector<BVHNode> bvh_nodes;
 	bool bvh_built = false;
+
+	std::vector<LightInfo> lights;
 };

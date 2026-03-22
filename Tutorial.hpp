@@ -103,7 +103,7 @@ struct Tutorial : RTG::Application {
 			struct { float r, g, b, padding_; } SUN_ENERGY;
 			struct { float x, y, z, padding_; } EYE;
 			struct { float x, y, z, padding_; } TONE;
-			uint32_t MAX_MIP, padding1_, padding2_, padding3_;
+			uint32_t MAX_MIP, LIGHT_COUNT, padding2_, padding3_;
 		};
 		static_assert(sizeof(World) == 7 * 4 * 4, "World is the expected size.");
 
@@ -119,6 +119,14 @@ struct Tutorial : RTG::Application {
 			struct {float ROUGHNESS, METALLIC, padding2_, padding3_;} PBR;
 			uint32_t TYPE, padding1_, padding2_, padding3_;
 		};
+
+		struct Light {
+			vec4 POSITION_TYPE;     // xyz = position, w = type
+			vec4 DIRECTION_SHADOW;  // xyz = direction, w = shadow
+			vec4 TINT_STRENGTH;     // rgb = tint, w = strength / power
+			vec4 PARAMS;            // angle / radius, limit, fov, blend
+		};
+		static_assert(sizeof(Light) == 4 * 4 * 4, "Light is the expected size.");
 
 		//no push constants
 
@@ -160,6 +168,11 @@ struct Tutorial : RTG::Application {
 		Helpers::AllocatedBuffer Transforms_src; //host coherent; mapped
 		Helpers::AllocatedBuffer Transforms; //device-local
 		VkDescriptorSet Transforms_descriptors; //references Transforms
+
+		//location for ObjectsPipeline::Light data: (streamed to GPU per-frame)
+		Helpers::AllocatedBuffer Lights_src; // host coherent; mapped
+		Helpers::AllocatedBuffer Lights;     // device-local
+		VkDescriptorSet Lights_descriptors;  // fold into set0_World
 	};
 	std::vector< Workspace > workspaces;
 
