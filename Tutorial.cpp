@@ -13,6 +13,9 @@
 #include "SceneViewer.hpp"
 #include <filesystem>
 
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
 
 static inline glm::mat4 to_glm(mat4 const& m) {
     glm::mat4 out;
@@ -68,12 +71,24 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				if (!rtg.configuration.scene_file.empty()) scene_viewer->s72 = S72::load(rtg.configuration.scene_file);
 			}
 
-			material_system.build_material_texture(scene_viewer->s72);
-			material_system.load_all_textures();
+		material_system.build_material_texture(scene_viewer->s72);
+		material_system.load_all_textures();
+		if (!scene_viewer->s72.environments.empty()) {
 			material_system.load_environment_map(scene_viewer->s72);
 			material_system.load_environment_map_diffuse();
-			
-			if (!rtg.configuration.camera_name.empty()) {
+		} else {
+			material_system.create_default_environment_map();
+			material_system.create_default_environment_diffuse();
+		}
+
+		{
+			std::filesystem::path scene_path = rtg.configuration.scene_file;
+			std::filesystem::path scene_dir  = scene_path.parent_path();
+			std::filesystem::path brdf_path  = scene_dir / "brdf_lut.raw";
+			material_system.load_brdf_lut(brdf_path.string(), 256);
+		}
+
+		if (!rtg.configuration.camera_name.empty()) {
 				if (scene_viewer->s72.cameras.count(rtg.configuration.camera_name) == 0) {
 					throw std::runtime_error(
 						"Camera '" + rtg.configuration.camera_name + "' not found in scene."
@@ -248,6 +263,77 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		VK( vkCreateRenderPass(rtg.device, &create_info, nullptr, &render_pass) );
 	}
 
+	{ // create shadow render pass:
+		//   attachment 0 – R32_SFLOAT color (shadow map, stored + read by main pass)
+		//   attachment 1 – depth (for depth testing during shadow pass only)
+		// Using a plain color attachment avoids the macOS/MoltenVK restriction that
+		// depth textures cannot be sampled with a non-comparison sampler
+		VkAttachmentDescription color_attachment{
+			.format = VK_FORMAT_R32_SFLOAT,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		};
+
+		VkAttachmentDescription depth_attachment{
+			.format = depth_format,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, // not sampled; discard after pass
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		};
+
+		std::array< VkAttachmentDescription, 2 > attachments{ color_attachment, depth_attachment };
+
+		VkAttachmentReference color_ref{
+			.attachment = 0,
+			.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		};
+		VkAttachmentReference depth_ref{
+			.attachment = 1,
+			.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		};
+
+		VkSubpassDescription subpass{
+			.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+			.colorAttachmentCount = 1,
+			.pColorAttachments = &color_ref,
+			.pDepthStencilAttachment = &depth_ref,
+		};
+
+		// Wait for the previous frame's main pass to finish reading the shadow map
+		// before the current shadow pass starts writing to it.
+		std::array< VkSubpassDependency, 1 > dependencies{
+			VkSubpassDependency{
+				.srcSubpass = VK_SUBPASS_EXTERNAL,
+				.dstSubpass = 0,
+				.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+				.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+				.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			},
+		};
+
+		VkRenderPassCreateInfo create_info{
+			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+			.attachmentCount = uint32_t(attachments.size()),
+			.pAttachments = attachments.data(),
+			.subpassCount = 1,
+			.pSubpasses = &subpass,
+			.dependencyCount = uint32_t(dependencies.size()),
+			.pDependencies = dependencies.data(),
+		};
+
+		VK( vkCreateRenderPass(rtg.device, &create_info, nullptr, &shadow_render_pass) );
+	}
+
 	{ //create command pool
 		VkCommandPoolCreateInfo create_info{
 			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -273,6 +359,31 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 	background_pipeline.create(rtg, render_pass, 0);
 	lines_pipeline.create(rtg, render_pass, 0);
 	objects_pipeline.create(rtg, render_pass, 0);
+	shadow_pipeline.create(rtg, shadow_render_pass);
+
+	{ // create sampler for shadow maps
+		// compareEnable must be VK_FALSE on macOS/MoltenVK (portability subset:
+		// mutableComparisonSamplers = VK_FALSE). Depth comparison is done manually
+		// in the fragment shader instead.
+		VkSamplerCreateInfo create_info{
+			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+			.magFilter = VK_FILTER_LINEAR,
+			.minFilter = VK_FILTER_LINEAR,
+			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+			.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+			.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+			.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+			.mipLodBias = 0.0f,
+			.anisotropyEnable = VK_FALSE,
+			.compareEnable = VK_FALSE,
+			.minLod = 0.0f,
+			.maxLod = 0.0f,
+			// Border depth = 1.0 → fragments outside the shadow map are fully lit.
+			.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
+			.unnormalizedCoordinates = VK_FALSE,
+		};
+		VK( vkCreateSampler(rtg.device, &create_info, nullptr, &shadow_sampler) );
+	}
 
 	{ //make image views for the textures
 		material_system.texture_views.reserve(material_system.textures.size());
@@ -345,22 +456,26 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		std::array< VkDescriptorPoolSize, 3> pool_sizes{
 			VkDescriptorPoolSize{
 				.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-				.descriptorCount = 2 * per_workspace, //Camera + World, one descriptor per set, two sets per workspace
+				// Camera + World + ShadowMatrices
+				.descriptorCount = 3 * per_workspace,
 			},
 			VkDescriptorPoolSize{
 				.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-				.descriptorCount = 1 * per_workspace, //Transforms, one descriptor per set, one set per workspace
+				// Transforms + Lights + AllWorldTransforms
+				.descriptorCount = 3 * per_workspace,
 			},
 			VkDescriptorPoolSize{
 				.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-				.descriptorCount = 2 * per_workspace, //Env + diffuse cubemap, one descriptor per set, one set per workspace
+				// ENV + ENV_LAMBERTIAN + BRDF_LUT + MAX_SHADOW_CASTERS shadow maps
+				.descriptorCount = (3 + MAX_SHADOW_CASTERS) * per_workspace,
 			},
 		};
 
 		VkDescriptorPoolCreateInfo create_info{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 			.flags = 0, //because CREATE_FREE_DESCRIPTOR_SET_BIT isn't included, *can't* free individual descriptors allocated from this pool
-			.maxSets = 3 * per_workspace, //three sets per workspace
+			// Camera + World + Transforms + AllWorldTransforms (shadow pipeline set0)
+			.maxSets = 4 * per_workspace,
 			.poolSizeCount = uint32_t(pool_sizes.size()),
 			.pPoolSizes = pool_sizes.data(),
 		};
@@ -440,6 +555,33 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 
 			VK( vkAllocateDescriptorSets(rtg.device, &alloc_info, &workspace.Transforms_descriptors) );
 			//NOTE: will fill in this descriptor set in render when buffers are [re-]allocated
+		}
+
+		{ // allocate descriptor set for shadow pipeline's set0 (AllWorldTransforms)
+			VkDescriptorSetAllocateInfo alloc_info{
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+				.descriptorPool = descriptor_pool,
+				.descriptorSetCount = 1,
+				.pSetLayouts = &shadow_pipeline.set0_WorldTransforms,
+			};
+			VK( vkAllocateDescriptorSets(rtg.device, &alloc_info, &workspace.AllWorldTransforms_descriptors) );
+			// Will be filled in render when AllWorldTransforms buffer is [re-]allocated.
+		}
+
+		{ // allocate fixed-size ShadowMatrices buffers (size never changes)
+			workspace.ShadowMatrices_src = rtg.helpers.create_buffer(
+				sizeof(ObjectsPipeline::ShadowMatricesUniform),
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				Helpers::Mapped
+			);
+			workspace.ShadowMatrices = rtg.helpers.create_buffer(
+				sizeof(ObjectsPipeline::ShadowMatricesUniform),
+				VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+			// Descriptor for binding 6 will be written after shadow images are created.
 		}
 
 
@@ -553,6 +695,253 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 
 	scene_viewer->build_scene_objects();
 	scene_viewer->cache_rest_pose_and_duration(anim_duration);
+
+	// Shadow resource initialization
+	// Assign shadow slots to spot lights that have shadow > 0.
+	light_shadow_slot.assign(scene_viewer->lights.size(), -1);
+	uint32_t next_slot = 0;
+	for (uint32_t i = 0; i < uint32_t(scene_viewer->lights.size()); ++i) {
+		auto const& l = scene_viewer->lights[i];
+		if (l.type == SceneViewer::LightInfo::Type::Spot && l.shadow > 0) {
+			if (next_slot < MAX_SHADOW_CASTERS) {
+				light_shadow_slot[i] = int32_t(next_slot);
+			ShadowLight sl;
+			sl.size = l.shadow;
+			sl.light_index = i;
+
+			VkExtent2D extent{ l.shadow, l.shadow };
+
+			// R32_SFLOAT color image: stores depth values, sampled by the main pass.
+			sl.shadow_map = rtg.helpers.create_image(
+				extent,
+				VK_FORMAT_R32_SFLOAT,
+				VK_IMAGE_TILING_OPTIMAL,
+				VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+
+			{ // shadow map image view (color)
+				VkImageViewCreateInfo create_info{
+					.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+					.image = sl.shadow_map.handle,
+					.viewType = VK_IMAGE_VIEW_TYPE_2D,
+					.format = VK_FORMAT_R32_SFLOAT,
+					.subresourceRange{
+						.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+						.baseMipLevel = 0,
+						.levelCount = 1,
+						.baseArrayLayer = 0,
+						.layerCount = 1,
+					},
+				};
+				VK( vkCreateImageView(rtg.device, &create_info, nullptr, &sl.shadow_map_view) );
+			}
+
+			// Depth buffer used only for depth testing during the shadow pass (not sampled).
+			sl.depth_buffer = rtg.helpers.create_image(
+				extent,
+				depth_format,
+				VK_IMAGE_TILING_OPTIMAL,
+				VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+
+			{ // depth buffer image view
+				VkImageViewCreateInfo create_info{
+					.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+					.image = sl.depth_buffer.handle,
+					.viewType = VK_IMAGE_VIEW_TYPE_2D,
+					.format = depth_format,
+					.subresourceRange{
+						.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+						.baseMipLevel = 0,
+						.levelCount = 1,
+						.baseArrayLayer = 0,
+						.layerCount = 1,
+					},
+				};
+				VK( vkCreateImageView(rtg.device, &create_info, nullptr, &sl.depth_buffer_view) );
+			}
+
+			{ // framebuffer: attachment 0 = shadow map (color), attachment 1 = depth buffer
+				std::array< VkImageView, 2 > fb_views{ sl.shadow_map_view, sl.depth_buffer_view };
+				VkFramebufferCreateInfo create_info{
+					.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+					.renderPass = shadow_render_pass,
+					.attachmentCount = uint32_t(fb_views.size()),
+					.pAttachments = fb_views.data(),
+					.width = l.shadow,
+					.height = l.shadow,
+					.layers = 1,
+				};
+				VK( vkCreateFramebuffer(rtg.device, &create_info, nullptr, &sl.framebuffer) );
+			}
+
+				shadow_lights.push_back(std::move(sl));
+				++next_slot;
+			}
+		}
+	}
+
+	// Dummy 1×1 R32_SFLOAT image (value 1.0 = fully lit) for unused shadow map slots.
+	dummy_shadow_image = rtg.helpers.create_image(
+		VkExtent2D{1, 1},
+		VK_FORMAT_R32_SFLOAT,
+		VK_IMAGE_TILING_OPTIMAL,
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		Helpers::Unmapped
+	);
+
+	{ // dummy image view (color, R32_SFLOAT)
+		VkImageViewCreateInfo create_info{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = dummy_shadow_image.handle,
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = VK_FORMAT_R32_SFLOAT,
+			.subresourceRange{
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = 1,
+			},
+		};
+		VK( vkCreateImageView(rtg.device, &create_info, nullptr, &dummy_shadow_image_view) );
+	}
+
+	{ // Initialize dummy shadow image: clear to 1.0 (fully lit) and put in SHADER_READ_ONLY_OPTIMAL.
+		// Real shadow map images start in UNDEFINED; the first shadow render pass transitions them.
+		VkCommandBuffer init_cmd = VK_NULL_HANDLE;
+		VkCommandBufferAllocateInfo alloc_info{
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+			.commandPool = command_pool,
+			.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+			.commandBufferCount = 1,
+		};
+		VK( vkAllocateCommandBuffers(rtg.device, &alloc_info, &init_cmd) );
+
+		VkCommandBufferBeginInfo begin_info{
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+		};
+		VK( vkBeginCommandBuffer(init_cmd, &begin_info) );
+
+		// Step 1: UNDEFINED → TRANSFER_DST_OPTIMAL so we can clear the dummy image.
+		{
+			VkImageMemoryBarrier barrier{
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = 0,
+				.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+				.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+				.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+				.image = dummy_shadow_image.handle,
+				.subresourceRange{
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.baseMipLevel = 0, .levelCount = 1,
+					.baseArrayLayer = 0, .layerCount = 1,
+				},
+			};
+			vkCmdPipelineBarrier(init_cmd,
+				VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT,
+				0, 0, nullptr, 0, nullptr, 1, &barrier);
+		}
+
+		// Step 2: Clear dummy to 1.0 (= max depth, so unused slots are always fully lit).
+		{
+			VkClearColorValue clear_color{ .float32 = {1.0f, 0.0f, 0.0f, 1.0f} };
+			VkImageSubresourceRange range{
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.baseMipLevel = 0, .levelCount = 1,
+				.baseArrayLayer = 0, .layerCount = 1,
+			};
+			vkCmdClearColorImage(init_cmd, dummy_shadow_image.handle,
+				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
+		}
+
+		// Step 3: TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL.
+		{
+			VkImageMemoryBarrier barrier{
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+				.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+				.image = dummy_shadow_image.handle,
+				.subresourceRange{
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.baseMipLevel = 0, .levelCount = 1,
+					.baseArrayLayer = 0, .layerCount = 1,
+				},
+			};
+			vkCmdPipelineBarrier(init_cmd,
+				VK_PIPELINE_STAGE_TRANSFER_BIT,
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0, 0, nullptr, 0, nullptr, 1, &barrier);
+		}
+
+		VK( vkEndCommandBuffer(init_cmd) );
+
+		VkSubmitInfo submit_info{
+			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+			.commandBufferCount = 1,
+			.pCommandBuffers = &init_cmd,
+		};
+		VK( vkQueueSubmit(rtg.graphics_queue, 1, &submit_info, VK_NULL_HANDLE) );
+		VK( vkQueueWaitIdle(rtg.graphics_queue) );
+		vkFreeCommandBuffers(rtg.device, command_pool, 1, &init_cmd);
+	}
+
+	// Update World_descriptors bindings 5 (shadow maps) and 6 (shadow matrices) for every workspace.
+	for (Workspace &workspace : workspaces) {
+		// Build image info array: real shadow maps first, then dummy for unused slots.
+		std::array< VkDescriptorImageInfo, MAX_SHADOW_CASTERS > shadow_image_infos;
+		for (uint32_t slot = 0; slot < MAX_SHADOW_CASTERS; ++slot) {
+		VkImageView view = (slot < shadow_lights.size())
+			? shadow_lights[slot].shadow_map_view
+			: dummy_shadow_image_view;
+			shadow_image_infos[slot] = VkDescriptorImageInfo{
+				.sampler = shadow_sampler,
+				.imageView = view,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+		}
+
+		VkDescriptorBufferInfo shadow_matrices_buf_info{
+			.buffer = workspace.ShadowMatrices.handle,
+			.offset = 0,
+			.range  = workspace.ShadowMatrices.size,
+		};
+
+		std::array< VkWriteDescriptorSet, 2 > writes{
+			VkWriteDescriptorSet{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = workspace.World_descriptors,
+				.dstBinding = 5,
+				.dstArrayElement = 0,
+				.descriptorCount = MAX_SHADOW_CASTERS,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = shadow_image_infos.data(),
+			},
+			VkWriteDescriptorSet{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = workspace.World_descriptors,
+				.dstBinding = 6,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.pBufferInfo = &shadow_matrices_buf_info,
+			},
+		};
+		vkUpdateDescriptorSets(rtg.device, uint32_t(writes.size()), writes.data(), 0, nullptr);
+	}
 
 	{ //initialization
 		auto it = scene_viewer->camera_indices.find(rtg.configuration.camera_name);
@@ -817,6 +1206,41 @@ Tutorial::~Tutorial() {
 		std::cerr << "Failed to vkDeviceWaitIdle in Tutorial::~Tutorial [" << string_VkResult(result) << "]; continuing anyway." << std::endl;
 	}
 
+	// Destroy shadow resources.
+	for (ShadowLight &sl : shadow_lights) {
+		if (sl.framebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(rtg.device, sl.framebuffer, nullptr);
+			sl.framebuffer = VK_NULL_HANDLE;
+		}
+		if (sl.depth_buffer_view != VK_NULL_HANDLE) {
+			vkDestroyImageView(rtg.device, sl.depth_buffer_view, nullptr);
+			sl.depth_buffer_view = VK_NULL_HANDLE;
+		}
+		if (sl.depth_buffer.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_image(std::move(sl.depth_buffer));
+		}
+		if (sl.shadow_map_view != VK_NULL_HANDLE) {
+			vkDestroyImageView(rtg.device, sl.shadow_map_view, nullptr);
+			sl.shadow_map_view = VK_NULL_HANDLE;
+		}
+		if (sl.shadow_map.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_image(std::move(sl.shadow_map));
+		}
+	}
+	shadow_lights.clear();
+
+	if (dummy_shadow_image_view != VK_NULL_HANDLE) {
+		vkDestroyImageView(rtg.device, dummy_shadow_image_view, nullptr);
+		dummy_shadow_image_view = VK_NULL_HANDLE;
+	}
+	if (dummy_shadow_image.handle != VK_NULL_HANDLE) {
+		rtg.helpers.destroy_image(std::move(dummy_shadow_image));
+	}
+
+	if (shadow_sampler != VK_NULL_HANDLE) {
+		vkDestroySampler(rtg.device, shadow_sampler, nullptr);
+		shadow_sampler = VK_NULL_HANDLE;
+	}
 
 	rtg.helpers.destroy_buffer(std::move(object_vertices));
 
@@ -868,6 +1292,21 @@ Tutorial::~Tutorial() {
 			rtg.helpers.destroy_buffer(std::move(workspace.Lights));
 		}
 		//Lights_descriptors freed when pool is destroyed.
+
+		if (workspace.AllWorldTransforms_src.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.AllWorldTransforms_src));
+		}
+		if (workspace.AllWorldTransforms.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.AllWorldTransforms));
+		}
+		//AllWorldTransforms_descriptors freed when pool is destroyed.
+
+		if (workspace.ShadowMatrices_src.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.ShadowMatrices_src));
+		}
+		if (workspace.ShadowMatrices.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.ShadowMatrices));
+		}
 	}
 	workspaces.clear();
 
@@ -880,6 +1319,7 @@ Tutorial::~Tutorial() {
 	background_pipeline.destroy(rtg);
 	lines_pipeline.destroy(rtg);
 	objects_pipeline.destroy(rtg);
+	shadow_pipeline.destroy(rtg);
 
 	if (command_pool != VK_NULL_HANDLE) {
 		vkDestroyCommandPool(rtg.device, command_pool, nullptr);
@@ -889,6 +1329,11 @@ Tutorial::~Tutorial() {
 	if (render_pass != VK_NULL_HANDLE) {
 		vkDestroyRenderPass(rtg.device, render_pass, nullptr);
 		render_pass = VK_NULL_HANDLE;
+	}
+
+	if (shadow_render_pass != VK_NULL_HANDLE) {
+		vkDestroyRenderPass(rtg.device, shadow_render_pass, nullptr);
+		shadow_render_pass = VK_NULL_HANDLE;
 	}
 
 	if (timestamp_query_pool != VK_NULL_HANDLE) {
@@ -1057,6 +1502,8 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			vkCmdCopyBuffer(workspace.command_buffer, workspace.Camera_src.handle, workspace.Camera.handle, 1, &copy_region);
 		}
 
+		scene_viewer->world.LIGHT_COUNT = uint32_t(scene_viewer->lights.size());
+
 		{ //upload world info:
 			// assert(workspace.Camera_src.size == sizeof(world));
 			assert(workspace.World_src.size == sizeof(scene_viewer->world));
@@ -1208,7 +1655,12 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 		std::vector<ObjectsPipeline::Light> gpu_lights;
 		gpu_lights.reserve(scene_viewer->lights.size());
 
-		for (auto const& l : scene_viewer->lights) {
+		auto safe_limit = [](float limit) -> float {
+			return std::isinf(limit) ? 1e30f : limit;
+		};
+
+		for (uint32_t li = 0; li < uint32_t(scene_viewer->lights.size()); ++li) {
+			auto const& l = scene_viewer->lights[li];
 			ObjectsPipeline::Light out{};
 
 			out.POSITION_TYPE[0] = l.position.x;
@@ -1219,7 +1671,8 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			out.DIRECTION_SHADOW[0] = l.direction.x;
 			out.DIRECTION_SHADOW[1] = l.direction.y;
 			out.DIRECTION_SHADOW[2] = l.direction.z;
-			out.DIRECTION_SHADOW[3] = float(l.shadow);
+			int32_t slot = (li < light_shadow_slot.size()) ? light_shadow_slot[li] : -1;
+			out.DIRECTION_SHADOW[3] = float(slot);
 
 			out.TINT_STRENGTH[0] = l.tint.r;
 			out.TINT_STRENGTH[1] = l.tint.g;
@@ -1237,7 +1690,7 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 				out.TINT_STRENGTH[3] = l.power;
 
 				out.PARAMS[0] = l.radius;
-				out.PARAMS[1] = l.limit;
+				out.PARAMS[1] = safe_limit(l.limit);
 				out.PARAMS[2] = 0.0f;
 				out.PARAMS[3] = 0.0f;
 
@@ -1245,7 +1698,7 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 				out.TINT_STRENGTH[3] = l.power;
 
 				out.PARAMS[0] = l.radius;
-				out.PARAMS[1] = l.limit;
+				out.PARAMS[1] = safe_limit(l.limit);
 				out.PARAMS[2] = l.fov;
 				out.PARAMS[3] = l.blend;
 			}
@@ -1317,9 +1770,118 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 							&copy_region);
 		}
 
-		scene_viewer->world.LIGHT_COUNT = uint32_t(scene_viewer->lights.size());
 	}
 
+	if (!scene_viewer->object_instances.empty() && !shadow_lights.empty()) {
+		// Upload all instances' WORLD_FROM_LOCAL matrices for use in shadow passes.
+		size_t needed_bytes = scene_viewer->object_instances.size() * sizeof(mat4);
+
+		if (workspace.AllWorldTransforms_src.handle == VK_NULL_HANDLE
+		    || workspace.AllWorldTransforms_src.size < needed_bytes) {
+
+			size_t new_bytes = ((needed_bytes + 4096) / 4096) * 4096;
+			if (workspace.AllWorldTransforms_src.handle) {
+				rtg.helpers.destroy_buffer(std::move(workspace.AllWorldTransforms_src));
+			}
+			if (workspace.AllWorldTransforms.handle) {
+				rtg.helpers.destroy_buffer(std::move(workspace.AllWorldTransforms));
+			}
+			workspace.AllWorldTransforms_src = rtg.helpers.create_buffer(
+				new_bytes,
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				Helpers::Mapped
+			);
+			workspace.AllWorldTransforms = rtg.helpers.create_buffer(
+				new_bytes,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+
+			// Update descriptor set for shadow pipeline set0.
+			VkDescriptorBufferInfo info{
+				.buffer = workspace.AllWorldTransforms.handle,
+				.offset = 0,
+				.range  = workspace.AllWorldTransforms.size,
+			};
+			VkWriteDescriptorSet write{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = workspace.AllWorldTransforms_descriptors,
+				.dstBinding = 0,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.pBufferInfo = &info,
+			};
+			vkUpdateDescriptorSets(rtg.device, 1, &write, 0, nullptr);
+		}
+
+		{ // copy WORLD_FROM_LOCAL for every instance into host buffer
+			assert(workspace.AllWorldTransforms_src.allocation.mapped);
+			mat4 *out = reinterpret_cast< mat4 * >(workspace.AllWorldTransforms_src.allocation.data());
+			for (auto const& inst : scene_viewer->object_instances) {
+				*out = inst.transform.WORLD_FROM_LOCAL;
+				++out;
+			}
+			VkBufferCopy region{ .srcOffset = 0, .dstOffset = 0, .size = needed_bytes };
+			vkCmdCopyBuffer(workspace.command_buffer,
+				workspace.AllWorldTransforms_src.handle,
+				workspace.AllWorldTransforms.handle,
+				1, &region);
+		}
+	}
+
+	if (!shadow_lights.empty()) {
+		// Compute and upload shadow matrices (CLIP_FROM_WORLD for each shadow light).
+		ObjectsPipeline::ShadowMatricesUniform shadow_matrices{};
+
+		for (uint32_t slot = 0; slot < uint32_t(shadow_lights.size()); ++slot) {
+			SceneViewer::LightInfo const& l = scene_viewer->lights[shadow_lights[slot].light_index];
+
+			// near_plane = max(light_radius, 1.0). Keeping near far from 0 gives adequate
+			// NDC depth precision at typical object distances (depth diff ≈ near/d² >> bias).
+			float near_plane = std::max(l.radius > 0.0f ? l.radius : 1.0f, 1.0f);
+			float far_plane  = (l.limit > 0.0f && l.limit < 1e8f) ? l.limit : 1000.0f;
+
+			mat4 proj = perspective(l.fov, 1.0f, near_plane, far_plane);
+
+			glm::vec3 dir(l.direction.x, l.direction.y, l.direction.z);
+			glm::vec3 up = (std::abs(glm::dot(dir, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.9f)
+				? glm::vec3(0.0f, 0.0f, 1.0f)
+				: glm::vec3(0.0f, 1.0f, 0.0f);
+
+		// l.direction stores -emission_dir (convention shared with sun lights),
+		// so subtract it to aim the shadow camera in the actual emission direction.
+		mat4 view = look_at(
+			l.position.x, l.position.y, l.position.z,
+			l.position.x - l.direction.x,
+			l.position.y - l.direction.y,
+			l.position.z - l.direction.z,
+			up.x, up.y, up.z
+		);
+
+		mat4 clip_from_world = proj * view;
+
+				// Store as glm::mat4 (column-major, same memory layout as mat4).
+			static_assert(sizeof(mat4) == sizeof(glm::mat4), "mat4 and glm::mat4 must have the same layout");
+			std::memcpy(&shadow_matrices.LIGHT_FROM_WORLD[slot],
+			            clip_from_world.data(),
+			            sizeof(mat4));
+		}
+
+		assert(workspace.ShadowMatrices_src.allocation.mapped);
+		std::memcpy(workspace.ShadowMatrices_src.allocation.data(),
+		            &shadow_matrices,
+		            sizeof(shadow_matrices));
+
+		VkBufferCopy region{ .srcOffset = 0, .dstOffset = 0,
+		                     .size = sizeof(ObjectsPipeline::ShadowMatricesUniform) };
+		vkCmdCopyBuffer(workspace.command_buffer,
+			workspace.ShadowMatrices_src.handle,
+			workspace.ShadowMatrices.handle,
+			1, &region);
+	}
 
 	{ //memory barrier to make sure copies complete before rendering happens:
 		VkMemoryBarrier memory_barrier{
@@ -1336,6 +1898,123 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			0, nullptr, //bufferMemoryBarriers (count, data)
 			0, nullptr //imageMemoryBarriers (count, data)
 		);
+	}
+
+	// Shadow passes: render scene depth from each shadow-casting light's perspective
+	if (!shadow_lights.empty()
+	    && !scene_viewer->object_instances.empty()
+	    && workspace.AllWorldTransforms.handle != VK_NULL_HANDLE) {
+
+		// Pre-compute CLIP_FROM_WORLD for each shadow light (reusing same logic as above).
+		std::vector< mat4 > shadow_clip_from_world(shadow_lights.size());
+		for (uint32_t slot = 0; slot < uint32_t(shadow_lights.size()); ++slot) {
+			SceneViewer::LightInfo const& l = scene_viewer->lights[shadow_lights[slot].light_index];
+
+			float near_plane = std::max(l.radius > 0.0f ? l.radius : 1.0f, 1.0f);
+			float far_plane  = (l.limit > 0.0f && l.limit < 1e8f) ? l.limit : 1000.0f;
+
+			mat4 proj = perspective(l.fov, 1.0f, near_plane, far_plane);
+
+			glm::vec3 dir(l.direction.x, l.direction.y, l.direction.z);
+			glm::vec3 up = (std::abs(glm::dot(dir, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.9f)
+				? glm::vec3(0.0f, 0.0f, 1.0f)
+				: glm::vec3(0.0f, 1.0f, 0.0f);
+
+			mat4 view = look_at(
+				l.position.x, l.position.y, l.position.z,
+				l.position.x - l.direction.x,
+				l.position.y - l.direction.y,
+				l.position.z - l.direction.z,
+				up.x, up.y, up.z
+			);
+			shadow_clip_from_world[slot] = proj * view;
+		}
+
+		for (uint32_t slot = 0; slot < uint32_t(shadow_lights.size()); ++slot) {
+			ShadowLight const& sl = shadow_lights[slot];
+
+			// Clear values for: [0] color attachment (1.0 = max depth = fully lit),
+			//                   [1] depth attachment (1.0 = far plane)
+			std::array< VkClearValue, 2 > clear_values{
+				VkClearValue{ .color{ .float32{1.0f, 0.0f, 0.0f, 1.0f} } },
+				VkClearValue{ .depthStencil{ .depth = 1.0f, .stencil = 0 } },
+			};
+			VkRenderPassBeginInfo shadow_begin{
+				.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+				.renderPass = shadow_render_pass,
+				.framebuffer = sl.framebuffer,
+				.renderArea{ .offset = {0, 0}, .extent = {sl.size, sl.size} },
+				.clearValueCount = uint32_t(clear_values.size()),
+				.pClearValues = clear_values.data(),
+			};
+			vkCmdBeginRenderPass(workspace.command_buffer, &shadow_begin, VK_SUBPASS_CONTENTS_INLINE);
+
+			VkViewport shadow_viewport{
+				.x = 0.0f, .y = 0.0f,
+				.width = float(sl.size), .height = float(sl.size),
+				.minDepth = 0.0f, .maxDepth = 1.0f,
+			};
+			VkRect2D shadow_scissor{ .offset = {0, 0}, .extent = {sl.size, sl.size} };
+			vkCmdSetViewport(workspace.command_buffer, 0, 1, &shadow_viewport);
+			vkCmdSetScissor(workspace.command_buffer, 0, 1, &shadow_scissor);
+
+			vkCmdBindPipeline(workspace.command_buffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline.handle);
+
+			vkCmdBindDescriptorSets(workspace.command_buffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline.layout,
+				0, 1, &workspace.AllWorldTransforms_descriptors, 0, nullptr);
+
+			// Bind the same vertex buffer used by the main pass.
+			VkBuffer vbufs[] = { object_vertices.handle };
+			VkDeviceSize voffsets[] = { 0 };
+			vkCmdBindVertexBuffers(workspace.command_buffer, 0, 1, vbufs, voffsets);
+
+			// Push light's CLIP_FROM_WORLD as push constant.
+			vkCmdPushConstants(workspace.command_buffer, shadow_pipeline.layout,
+				VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mat4),
+				shadow_clip_from_world[slot].data());
+
+			// Draw all object instances.
+			for (uint32_t i = 0; i < uint32_t(scene_viewer->object_instances.size()); ++i) {
+				SceneViewer::ObjectInstance const& inst = scene_viewer->object_instances[i];
+				vkCmdDraw(workspace.command_buffer,
+					inst.vertices.count, 1, inst.vertices.first, i);
+			}
+
+			vkCmdEndRenderPass(workspace.command_buffer);
+		}
+
+		// Execution + memory dependency: color writes in shadow passes must be
+		// visible to fragment shader reads in the main pass.
+		{
+			std::vector< VkImageMemoryBarrier > barriers;
+			barriers.reserve(shadow_lights.size());
+			for (auto const& sl : shadow_lights) {
+				barriers.push_back(VkImageMemoryBarrier{
+					.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+					.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+					.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+					.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+					.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+					.image = sl.shadow_map.handle,
+					.subresourceRange{
+						.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+						.baseMipLevel = 0, .levelCount = 1,
+						.baseArrayLayer = 0, .layerCount = 1,
+					},
+				});
+			}
+			vkCmdPipelineBarrier(workspace.command_buffer,
+				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0,
+				0, nullptr,
+				0, nullptr,
+				uint32_t(barriers.size()), barriers.data());
+		}
 	}
 
 	//TODO: put GPU commands here!
@@ -1725,22 +2404,22 @@ void Tutorial::update(float dt) {
 		// }
 	}
 
-	{ //static sun and sky:
+	{ //default sun and sky (only used if scene has no corresponding lights):
 		scene_viewer->world.SKY_DIRECTION.x = 0.0f;
 		scene_viewer->world.SKY_DIRECTION.y = 0.0f;
 		scene_viewer->world.SKY_DIRECTION.z = 1.0f;
 
-		scene_viewer->world.SKY_ENERGY.r = 0.1f;
-		scene_viewer->world.SKY_ENERGY.g = 0.1f;
-		scene_viewer->world.SKY_ENERGY.b = 0.2f;
+		scene_viewer->world.SKY_ENERGY.r = 0.0f;
+		scene_viewer->world.SKY_ENERGY.g = 0.0f;
+		scene_viewer->world.SKY_ENERGY.b = 0.0f;
 
-		scene_viewer->world.SUN_DIRECTION.x = 6.0f / 23.0f;
-		scene_viewer->world.SUN_DIRECTION.y = 13.0f / 23.0f;
-		scene_viewer->world.SUN_DIRECTION.z = 18.0f / 23.0f;
+		scene_viewer->world.SUN_DIRECTION.x = 0.0f;
+		scene_viewer->world.SUN_DIRECTION.y = 0.0f;
+		scene_viewer->world.SUN_DIRECTION.z = 1.0f;
 
-		scene_viewer->world.SUN_ENERGY.r = 1.0f;
-		scene_viewer->world.SUN_ENERGY.g = 1.0f;
-		scene_viewer->world.SUN_ENERGY.b = 0.9f;
+		scene_viewer->world.SUN_ENERGY.r = 0.0f;
+		scene_viewer->world.SUN_ENERGY.g = 0.0f;
+		scene_viewer->world.SUN_ENERGY.b = 0.0f;
 	}
 
 	scene_viewer->world.EYE.x = eye.x;

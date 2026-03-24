@@ -14,6 +14,8 @@
 
 #include "MaterialSystem.hpp"
 
+#include <glm/glm.hpp>
+
 struct SceneViewer;
 
 struct Tutorial : RTG::Application {
@@ -21,6 +23,9 @@ struct Tutorial : RTG::Application {
 	Tutorial(RTG &);
 	Tutorial(Tutorial const &) = delete; //you shouldn't be copying this object
 	~Tutorial();
+
+	// Maximum number of spot lights that can cast shadows simultaneously.
+	static constexpr uint32_t MAX_SHADOW_CASTERS = 8;
 
 	struct CPUTimer {
 		using clock = std::chrono::steady_clock;
@@ -122,13 +127,20 @@ struct Tutorial : RTG::Application {
 
 		struct Light {
 			vec4 POSITION_TYPE;     // xyz = position, w = type
-			vec4 DIRECTION_SHADOW;  // xyz = direction, w = shadow
+			vec4 DIRECTION_SHADOW;  // xyz = direction, w = shadow slot index (-1 if no shadow)
 			vec4 TINT_STRENGTH;     // rgb = tint, w = strength / power
 			vec4 PARAMS;            // angle / radius, limit, fov, blend
 		};
 		static_assert(sizeof(Light) == 4 * 4 * 4, "Light is the expected size.");
 
-		//no push constants
+		// Shadow matrices for up to MAX_SHADOW_CASTERS spot lights (std140 uniform buffer).
+		struct ShadowMatricesUniform {
+			glm::mat4 LIGHT_FROM_WORLD[MAX_SHADOW_CASTERS];
+		};
+		static_assert(sizeof(ShadowMatricesUniform) == MAX_SHADOW_CASTERS * 64,
+		              "ShadowMatricesUniform is the expected size.");
+
+		//no push constants for main pipeline
 
 		VkPipelineLayout layout = VK_NULL_HANDLE;
 
@@ -140,6 +152,47 @@ struct Tutorial : RTG::Application {
 		void create(RTG &, VkRenderPass render_pass, uint32_t subpass);
 		void destroy(RTG &);
 	} objects_pipeline;
+
+	// Pipeline used to render shadow maps for spot lights
+	// Renders a R32_SFLOAT color attachment so that the result can be sampled
+	// on macOS/MoltenVK without the depth-texture sampling restriction
+	struct ShadowPipeline {
+		VkDescriptorSetLayout set0_WorldTransforms = VK_NULL_HANDLE;
+		VkPipelineLayout layout = VK_NULL_HANDLE;
+		VkPipeline handle = VK_NULL_HANDLE;
+
+		void create(RTG &, VkRenderPass shadow_render_pass);
+		void destroy(RTG &);
+	} shadow_pipeline;
+
+	// Render pass for shadow map generation:
+	//   attachment 0 – R32_SFLOAT color (the shadow map, sampled in main pass)
+	//   attachment 1 – D32_SFLOAT depth (depth testing during shadow pass, not sampled)
+	VkRenderPass shadow_render_pass = VK_NULL_HANDLE;
+
+	// Sampler for reading R32_SFLOAT shadow maps (no comparison — done manually in GLSL)
+	VkSampler shadow_sampler = VK_NULL_HANDLE;
+
+	// Per-light shadow map resources (one entry per slot in [0, MAX_SHADOW_CASTERS))
+	struct ShadowLight {
+		// R32_SFLOAT color image — stores depth values, sampled in the main pass
+		Helpers::AllocatedImage shadow_map;
+		VkImageView shadow_map_view = VK_NULL_HANDLE;
+		// D32_SFLOAT depth image — used only for depth testing during the shadow pass
+		Helpers::AllocatedImage depth_buffer;
+		VkImageView depth_buffer_view = VK_NULL_HANDLE;
+		VkFramebuffer framebuffer = VK_NULL_HANDLE;
+		uint32_t size = 0;        // edge length of the shadow map in pixels
+		uint32_t light_index = 0; // index into scene_viewer->lights
+	};
+	std::vector< ShadowLight > shadow_lights; // length <= MAX_SHADOW_CASTERS
+
+	// Maps scene_viewer->lights[i] to its shadow slot, or -1 if none
+	std::vector< int32_t > light_shadow_slot;
+
+	// 1×1 dummy R32_SFLOAT image (value 1.0 = fully lit) for unused shadow map slots
+	Helpers::AllocatedImage dummy_shadow_image;
+	VkImageView dummy_shadow_image_view = VK_NULL_HANDLE;
 
 
 	//pools from which per-workspace things are allocated:
@@ -173,6 +226,17 @@ struct Tutorial : RTG::Application {
 		Helpers::AllocatedBuffer Lights_src; // host coherent; mapped
 		Helpers::AllocatedBuffer Lights;     // device-local
 		VkDescriptorSet Lights_descriptors;  // fold into set0_World
+
+		// All object instances' WORLD_FROM_LOCAL matrices (mat4 each), used by shadow pipeline
+		// Uploaded per-frame; size grows lazily with object count
+		Helpers::AllocatedBuffer AllWorldTransforms_src; // host coherent; mapped
+		Helpers::AllocatedBuffer AllWorldTransforms;     // device-local
+		VkDescriptorSet AllWorldTransforms_descriptors;  // set0 for shadow pipeline
+
+		// Shadow matrices uniform buffer: CLIP_FROM_WORLD for each shadow light slot
+		Helpers::AllocatedBuffer ShadowMatrices_src; // host coherent; mapped
+		Helpers::AllocatedBuffer ShadowMatrices;     // device-local
+		// (referenced from World_descriptors binding 6 after allocation)
 	};
 	std::vector< Workspace > workspaces;
 

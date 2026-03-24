@@ -16,7 +16,7 @@ void Tutorial::ObjectsPipeline::create(RTG &rtg, VkRenderPass render_pass, uint3
     VkShaderModule frag_module = rtg.helpers.create_shader_module(frag_code);
 
     { //the set0_World layout holds world info in a uniform buffer and the environment cubemap sampler used in the fragment shader:
-        std::array< VkDescriptorSetLayoutBinding, 5 > bindings{
+        std::array< VkDescriptorSetLayoutBinding, 7 > bindings{
 			VkDescriptorSetLayoutBinding{
 				.binding = 0,
 				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -46,6 +46,20 @@ void Tutorial::ObjectsPipeline::create(RTG &rtg, VkRenderPass render_pass, uint3
                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
+            },
+            // binding 5: shadow map array (sampler2DShadow[MAX_SHADOW_CASTERS])
+            VkDescriptorSetLayoutBinding{
+                .binding = 5,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = MAX_SHADOW_CASTERS,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
+            // binding 6: shadow matrices uniform buffer (CLIP_FROM_WORLD per shadow light)
+            VkDescriptorSetLayoutBinding{
+                .binding = 6,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
             },
 		};
 

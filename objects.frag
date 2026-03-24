@@ -6,9 +6,12 @@ const uint LIGHT_SPOT   = 2u;
 
 const float PI = 3.14159265359;
 
+// Maximum number of shadow-casting spot lights
+const int MAX_SHADOW_CASTERS = 8;
+
 struct Light {
     vec4 POSITION_TYPE;
-    vec4 DIRECTION_SHADOW;
+    vec4 DIRECTION_SHADOW;  // xyz = direction, w = shadow slot index (-1 if no shadow)
     vec4 TINT_STRENGTH;
     vec4 PARAMS;
 };
@@ -32,6 +35,12 @@ layout(set=0,binding=3) uniform sampler2D BRDF_LUT;
 layout(set=0,binding=4,std430) readonly buffer LightsBlock {
     Light LIGHTS[];
 };
+// Shadow maps
+layout(set=0,binding=5) uniform sampler2D SHADOW_MAPS[MAX_SHADOW_CASTERS];
+// World-to-light clip-space transforms for each shadow slot
+layout(set=0,binding=6,std140) uniform ShadowBlock {
+    mat4 LIGHT_FROM_WORLD[MAX_SHADOW_CASTERS];
+} SHADOW_DATA;
 
 //layout(set=2,binding=0) uniform sampler2D TEXTURE;
 layout(set=2,binding=0,std140) uniform MaterialParams {
@@ -74,21 +83,64 @@ vec3 apply_tonemapping(vec3 radiance, float exposure, uint op) {
 }
 
 
+// 4-sample PCF shadow lookup
+float sample_shadow_pcf(int shadow_idx, vec3 P) {
+    vec4 sc = SHADOW_DATA.LIGHT_FROM_WORLD[shadow_idx] * vec4(P, 1.0);
+    sc.xyz /= sc.w;
+
+    // sc.xy is in [-1,1]; sc.z is in [0,1] (Vulkan clip space).
+    vec2 uv = sc.xy * 0.5 + 0.5;
+    float ref_depth = sc.z;
+
+    // If outside the shadow map bounds, treat as fully lit.
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0
+        || ref_depth <= 0.0 || ref_depth >= 1.0) {
+        return 1.0;
+    }
+
+    vec2 texelSize = 1.0 / vec2(textureSize(SHADOW_MAPS[shadow_idx], 0));
+
+    // 2×2 offset kernel (4 taps) for PCF.
+    const vec2 offsets[4] = vec2[4](
+        vec2(-0.5, -0.5),
+        vec2( 0.5, -0.5),
+        vec2(-0.5,  0.5),
+        vec2( 0.5,  0.5)
+    );
+
+    // Bias tuned for near_plane = 1.0
+    // With near=1.0 and objects at d=8, depth precision ≈ 0.015 >> this bias
+    const float SHADOW_BIAS = 0.001;
+
+    float shadow = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        float shadow_map_depth = texture(SHADOW_MAPS[shadow_idx],
+                                         uv + offsets[i] * texelSize).r;
+        shadow += ((ref_depth - SHADOW_BIAS) <= shadow_map_depth) ? 1.0 : 0.0;
+    }
+    return shadow * 0.25;
+}
+
 float spot_falloff(vec3 Ldir, vec3 spot_dir, float fov, float blend) {
     float cosTheta = dot(normalize(-Ldir), normalize(spot_dir));
-    float inner = cos(fov * 0.5 * (1.0 - blend));
-    float outer = cos(fov * 0.5);
+    cosTheta = clamp(cosTheta, -1.0, 1.0);
+    float theta = acos(cosTheta);
 
-    if (cosTheta <= outer) return 0.0;
-    if (cosTheta >= inner) return 1.0;
+    float inner_angle = fov * 0.5 * (1.0 - blend);
+    float outer_angle = fov * 0.5;
 
-    return smoothstep(outer, inner, cosTheta);
+    if (theta >= outer_angle) return 0.0;
+    if (theta <= inner_angle) return 1.0;
+
+    return (outer_angle - theta) / max(outer_angle - inner_angle, 1e-6);
 }
 
 float limit_falloff(float d, float limit) {
-    if (limit <= 0.0) return 1.0;
+    if (limit <= 0.0 || limit > 1e20) return 1.0;
 
-    float x = max(0.0, 1.0 - pow(d / limit, 4.0));
+    float ratio = d / limit;
+    float r2 = ratio * ratio;
+    float x = max(0.0, 1.0 - r2 * r2);
     return x;
 }
 
@@ -108,16 +160,14 @@ vec3 evaluate_direct_diffuse(vec3 P, vec3 N) {
         vec3 radiance = vec3(0.0);
 
         if (type == LIGHT_SUN) {
-            vec3 sun_dir = normalize(light.DIRECTION_SHADOW.xyz);
+            // stored direction is opposite of emission, i.e. toward the sun
+            L = normalize(light.DIRECTION_SHADOW.xyz);
 
-            // light emits along -z, so shading uses opposite direction
-            L = normalize(-sun_dir);
-
-            // sun strength is W/m^2, no distance falloff
             radiance = light_tint * intensity;
         }
         else if (type == LIGHT_SPHERE) {
             vec3 light_pos = light.POSITION_TYPE.xyz;
+            float radius = light.PARAMS.x;
             float limit = light.PARAMS.y;
 
             vec3 to_light = light_pos - P;
@@ -126,15 +176,16 @@ vec3 evaluate_direct_diffuse(vec3 P, vec3 N) {
 
             L = to_light / dist;
 
-            float attenuation = 1.0 / max(4.0 * PI * dist * dist, 1e-4);
+            float eff_dist = max(dist, radius);
+            float attenuation = 1.0 / (4.0 * PI * eff_dist * eff_dist);
             attenuation *= limit_falloff(dist, limit);
 
-            // sphere power is total emitted power in watts
             radiance = light_tint * intensity * attenuation;
         }
         else if (type == LIGHT_SPOT) {
             vec3 light_pos = light.POSITION_TYPE.xyz;
             vec3 spot_dir = normalize(light.DIRECTION_SHADOW.xyz);
+            float radius = light.PARAMS.x;
             float limit = light.PARAMS.y;
             float fov   = light.PARAMS.z;
             float blend = light.PARAMS.w;
@@ -145,13 +196,21 @@ vec3 evaluate_direct_diffuse(vec3 P, vec3 N) {
 
             L = to_light / dist;
 
-            float attenuation = 1.0 / max(4.0 * PI * dist * dist, 1e-4);
+            float eff_dist = max(dist, radius);
+            float attenuation = 1.0 / (4.0 * PI * eff_dist * eff_dist);
             attenuation *= limit_falloff(dist, limit);
 
-            float cone = spot_falloff(L, spot_dir, fov, blend);
+            float cone = spot_falloff(L, -spot_dir, fov, blend);
+            if (cone <= 0.0) continue;
 
-            // spot power is defined relative to sphere power
-            radiance = light_tint * intensity * attenuation * cone;
+            float shadow_factor = 1.0;
+            int shadow_idx = int(light.DIRECTION_SHADOW.w);
+            if (shadow_idx >= 0 && shadow_idx < MAX_SHADOW_CASTERS) {
+                shadow_factor = sample_shadow_pcf(shadow_idx, P);
+            }
+            if (shadow_factor <= 0.0) continue;
+
+            radiance = light_tint * intensity * attenuation * cone * shadow_factor;
         }
 
         float NoL = max(dot(N, L), 0.0);
@@ -252,12 +311,17 @@ vec3 evaluate_direct_specular(vec3 P, vec3 N, vec3 V, float roughness, vec3 F0) 
         float intensity = light.TINT_STRENGTH.w;
 
         if (type == LIGHT_SUN) {
-            vec3 Lsun = normalize(-light.DIRECTION_SHADOW.xyz);
+            vec3 Lsun = normalize(light.DIRECTION_SHADOW.xyz);
             float angle = light.PARAMS.x;
 
             vec3 Lrep = representative_direction_in_sun(Lsun, R, angle);
+
+            float sun_half_angle = sin(angle * 0.5);
+            float norm_factor = roughness / max(roughness + sun_half_angle * 0.5, 1e-4);
+            norm_factor *= norm_factor;
+
             vec3 spec = ggx_specular(N, V, Lrep, roughness, F0);
-            result += tint * intensity * spec * max(dot(N, Lrep), 0.0);
+            result += tint * intensity * norm_factor * spec * max(dot(N, Lrep), 0.0);
         }
         else if (type == LIGHT_SPHERE) {
             vec3 C = light.POSITION_TYPE.xyz;
@@ -268,14 +332,18 @@ vec3 evaluate_direct_specular(vec3 P, vec3 N, vec3 V, float roughness, vec3 F0) 
             float dist = length(to_light);
             if (dist <= 1e-5) continue;
 
-            float attenuation = 1.0 / max(4.0 * PI * dist * dist, 1e-4);
+            float eff_dist = max(dist, radius);
+            float attenuation = 1.0 / (4.0 * PI * eff_dist * eff_dist);
             attenuation *= limit_falloff(dist, limit);
 
             vec3 rep_point = representative_point_on_sphere(P, R, C, radius);
             vec3 Lrep = normalize(rep_point - P);
 
+            float norm_factor = roughness / max(roughness + 0.5 * radius / eff_dist, 1e-4);
+            norm_factor *= norm_factor;
+
             vec3 spec = ggx_specular(N, V, Lrep, roughness, F0);
-            result += tint * intensity * attenuation * spec * max(dot(N, Lrep), 0.0);
+            result += tint * intensity * attenuation * norm_factor * spec * max(dot(N, Lrep), 0.0);
         }
         else if (type == LIGHT_SPOT) {
             vec3 C = light.POSITION_TYPE.xyz;
@@ -290,17 +358,28 @@ vec3 evaluate_direct_specular(vec3 P, vec3 N, vec3 V, float roughness, vec3 F0) 
             if (dist <= 1e-5) continue;
 
             vec3 Lcenter = to_light / dist;
-            float cone = spot_falloff(Lcenter, spot_dir, fov, blend);
+            float cone = spot_falloff(Lcenter, -spot_dir, fov, blend);
             if (cone <= 0.0) continue;
 
-            float attenuation = 1.0 / max(4.0 * PI * dist * dist, 1e-4);
+            float shadow_factor = 1.0;
+            int shadow_idx = int(light.DIRECTION_SHADOW.w);
+            if (shadow_idx >= 0 && shadow_idx < MAX_SHADOW_CASTERS) {
+                shadow_factor = sample_shadow_pcf(shadow_idx, P);
+            }
+            if (shadow_factor <= 0.0) continue;
+
+            float eff_dist = max(dist, radius);
+            float attenuation = 1.0 / (4.0 * PI * eff_dist * eff_dist);
             attenuation *= limit_falloff(dist, limit);
 
             vec3 rep_point = representative_point_on_sphere(P, R, C, radius);
             vec3 Lrep = normalize(rep_point - P);
 
+            float norm_factor = roughness / max(roughness + 0.5 * radius / eff_dist, 1e-4);
+            norm_factor *= norm_factor;
+
             vec3 spec = ggx_specular(N, V, Lrep, roughness, F0);
-            result += tint * intensity * attenuation * cone * spec * max(dot(N, Lrep), 0.0);
+            result += tint * intensity * attenuation * cone * shadow_factor * norm_factor * spec * max(dot(N, Lrep), 0.0);
         }
     }
 

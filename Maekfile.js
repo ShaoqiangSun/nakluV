@@ -69,6 +69,13 @@ const objects_shaders = [
 ];
 main_objs.push( maek.CPP('Tutorial-ObjectsPipeline.cpp', undefined, { depends:[...objects_shaders] } ) );
 
+//build shadow shaders and pipeline:
+const shadow_shaders = [
+	maek.GLSLC('shadow.vert'),
+	maek.GLSLC('shadow.frag'),
+];
+main_objs.push( maek.CPP('Tutorial-ShadowPipeline.cpp', undefined, { depends:[...shadow_shaders] } ) );
+
 
 
 const main_exe = maek.LINK([...main_objs], 'bin/main');
