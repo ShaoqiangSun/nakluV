@@ -246,6 +246,10 @@ void MaterialSystem::build_material_texture(S72 const &s72) {
                 info.metallic_tex_index,
                 info.has_metallic_tex
             );
+
+            if (mat->name == "pbr:water") {
+                out.ALBEDO.padding_ = 1.0f;
+            }
         }
 
         if (mat->normal_map) {

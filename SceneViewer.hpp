@@ -65,6 +65,37 @@ struct SceneViewer {
         float blend = 0.0f;     // spot
 	};
 
+	// Resolved per-scene water instance derived from an S72::Water attached to
+	// some scene node.  Caustic generation reads these.
+	struct WaterInfo {
+		glm::mat4 world_from_local = glm::mat4(1.0f);
+
+		float width = 10.0f;
+		float height = 10.0f;
+		uint32_t resolution = 64;
+		float receiver_z = 5.0f;
+		float caustic_extent = 12.0f;
+		float caustic_intensity = 1.0f;
+
+		// When true, use caustic_tint (linear RGB) as main-pass caustic colour instead
+		// of auto sun / sphere light colour.
+		bool caustic_tint_set = false;
+		glm::vec3 caustic_tint{1.0f, 1.0f, 1.0f};
+
+		struct WaveOctave {
+			float amplitude = 0.05f;
+			float frequency = 1.0f;
+			float direction = 0.0f;
+			float speed = 1.0f;
+		};
+		std::vector< WaveOctave > waves;
+
+		// Axis-aligned room for six-face caustic splats (world space).
+		glm::vec3 room_min{0.0f};
+		glm::vec3 room_max{1.0f};
+		bool room_aabb_set = false;
+	};
+
     bool aabb_intersects_frustum(AABB const &box_target_space, glm::mat4 const& transform_matrix);
 
     void load_mesh_vertices(std::vector< PosNorTanTexVertex > &vertices_pool);
@@ -117,4 +148,7 @@ struct SceneViewer {
 	bool bvh_built = false;
 
 	std::vector<LightInfo> lights;
+
+	// All water surfaces discovered during traversal. Used by the caustic pass.
+	std::vector<WaterInfo> waters;
 };

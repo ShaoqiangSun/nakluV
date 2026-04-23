@@ -65,7 +65,7 @@ main_objs.push( maek.CPP('Tutorial-LinesPipeline.cpp', undefined, { depends:[...
 //uncomment to build objects shaders and pipeline:
 const objects_shaders = [
 	maek.GLSLC('objects.vert'),
-	maek.GLSLC('objects.frag'),
+	maek.GLSLC('objects.frag', undefined, { depends: ['water_waves.glsl'] }),
 ];
 main_objs.push( maek.CPP('Tutorial-ObjectsPipeline.cpp', undefined, { depends:[...objects_shaders] } ) );
 
@@ -75,6 +75,13 @@ const shadow_shaders = [
 	maek.GLSLC('shadow.frag'),
 ];
 main_objs.push( maek.CPP('Tutorial-ShadowPipeline.cpp', undefined, { depends:[...shadow_shaders] } ) );
+
+//build caustic (water reflection photon-splatting) shaders and pipeline:
+const caustic_shaders = [
+	maek.GLSLC('caustic.vert', undefined, { depends: ['water_waves.glsl'] }),
+	maek.GLSLC('caustic.frag'),
+];
+main_objs.push( maek.CPP('Tutorial-CausticPipeline.cpp', undefined, { depends:[...caustic_shaders] } ) );
 
 
 
@@ -179,7 +186,8 @@ function custom_flags_and_rules() {
 	//custom rule that runs glslc:
 	
 	maek.DEFAULT_OPTIONS.GLSLC = [`${VULKAN_SDK}/bin/glslc` + (maek.OS === 'windows' ? '.exe' : ''), '-Werror', '-g', '-mfmt=c', '--target-env=vulkan1.2'];
-	maek.DEFAULT_OPTIONS.GLSLCFlags = [];
+	// Allow #include "water_waves.glsl" from project root
+	maek.DEFAULT_OPTIONS.GLSLCFlags = ['-I.'];
 	maek.DEFAULT_OPTIONS.spirvSuffix = '.inl';
 	maek.DEFAULT_OPTIONS.spirvPrefix = 'spv/';
 

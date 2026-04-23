@@ -460,6 +460,17 @@ S72 S72::load(std::string const &scene_file) {
 				object.erase(f);
 			}
 
+			if (auto f = object.find("water"); f != object.end()) {
+				std::string ref;
+				try {
+					ref = f->second.as_string().value();
+				} catch (std::exception &) {
+					throw std::runtime_error("Node \"" + name + "\"'s water should be a string.");
+				}
+				node.water = &s72.waters[ref];
+				object.erase(f);
+			}
+
 		} else if (type == "MESH"){
 			//reference to the thing we are parsing into:
 			Mesh &mesh = s72.meshes[name];
@@ -971,6 +982,95 @@ S72 S72::load(std::string const &scene_file) {
 
 			if (!have_source) {
 				throw std::runtime_error("Light \"" + name + "\" is missing a source.");
+			}
+		} else if (type == "WATER") {
+			Water &water = s72.waters[name];
+
+			if (water.name != "") {
+				throw std::runtime_error("Multiple \"WATER\" objects with name \"" + name + "\".");
+			}
+			water.name = name;
+
+			if (object.contains("width"))  water.width  = extract_float(&object, "width",  "Water \"" + name + "\"'s width");
+			if (object.contains("height")) water.height = extract_float(&object, "height", "Water \"" + name + "\"'s height");
+			if (object.contains("resolution")) {
+				water.resolution = extract_uint32_t(&object, "resolution", "Water \"" + name + "\"'s resolution");
+			}
+			if (object.contains("receiver_z")) {
+				water.receiver_z = extract_float(&object, "receiver_z", "Water \"" + name + "\"'s receiver_z");
+			}
+			if (object.contains("caustic_extent")) {
+				water.caustic_extent = extract_float(&object, "caustic_extent", "Water \"" + name + "\"'s caustic_extent");
+			}
+			if (object.contains("caustic_intensity")) {
+				water.caustic_intensity = extract_float(&object, "caustic_intensity", "Water \"" + name + "\"'s caustic_intensity");
+			}
+			if (object.contains("caustic_tint")) {
+				auto it = object.find("caustic_tint");
+				std::vector< sejp::value > const &vec = it->second.as_array().value();
+				if (vec.size() != 3) {
+					throw std::runtime_error("Water \"" + name + "\"'s caustic_tint should be an array of three numbers.");
+				}
+				water.caustic_tint = S72::vec3(
+					float(vec[0].as_number().value()),
+					float(vec[1].as_number().value()),
+					float(vec[2].as_number().value()));
+				water.caustic_tint_set = true;
+				object.erase(it);
+			}
+
+			auto read_vec3 = [&](char const *key, S72::vec3 *out) {
+				auto it = object.find(key);
+				if (it == object.end()) return;
+				std::vector< sejp::value > const &vec = it->second.as_array().value();
+				if (vec.size() != 3) {
+					throw std::runtime_error(std::string("Water \"") + name + "\"'s " + key + " should be an array of three numbers.");
+				}
+				*out = S72::vec3(
+					float(vec[0].as_number().value()),
+					float(vec[1].as_number().value()),
+					float(vec[2].as_number().value()));
+				object.erase(it);
+			};
+			{
+				S72::vec3 mn{}, mx{};
+				bool had_min = object.contains("room_min");
+				bool had_max = object.contains("room_max");
+				read_vec3("room_min", &mn);
+				read_vec3("room_max", &mx);
+				if (had_min != had_max) {
+					throw std::runtime_error("Water \"" + name + "\" should specify both room_min and room_max, or neither.");
+				}
+				if (had_min) {
+					water.room_min = mn;
+					water.room_max = mx;
+					water.room_aabb_set = true;
+				}
+			}
+
+			if (auto f = object.find("waves"); f != object.end()) {
+				std::vector< sejp::value > array;
+				try {
+					array = f->second.as_array().value();
+				} catch (std::exception &) {
+					throw std::runtime_error("Water \"" + name + "\"'s waves should be an array.");
+				}
+				for (size_t k = 0; k < array.size(); ++k) {
+					std::map< std::string, sejp::value > obj;
+					try {
+						obj = array[k].as_object().value();
+					} catch (std::exception &) {
+						throw std::runtime_error("Water \"" + name + "\"'s waves[" + std::to_string(k) + "] should be an object.");
+					}
+					Water::WaveOctave wave;
+					if (obj.contains("amplitude")) wave.amplitude = extract_float(&obj, "amplitude", "Water \"" + name + "\"'s wave amplitude");
+					if (obj.contains("frequency")) wave.frequency = extract_float(&obj, "frequency", "Water \"" + name + "\"'s wave frequency");
+					if (obj.contains("direction")) wave.direction = extract_float(&obj, "direction", "Water \"" + name + "\"'s wave direction");
+					if (obj.contains("speed"))     wave.speed     = extract_float(&obj, "speed",     "Water \"" + name + "\"'s wave speed");
+					water.waves.push_back(wave);
+					warn_on_unhandled(obj, "Water \"" + name + "\"'s wave");
+				}
+				object.erase(f);
 			}
 		} else {
 			std::cerr << "WARNING: ignoring object \"" << name << "\" of unrecognized type \"" << type << "\"." << std::endl;

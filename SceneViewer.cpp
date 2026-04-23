@@ -411,6 +411,49 @@ void SceneViewer::traverse_node(S72::Node* node, glm::mat4 const& parent, bool i
 
 	}
 
+	if (node->water != nullptr) {
+		S72::Water const& w = *node->water;
+		WaterInfo info;
+		info.world_from_local = world_glm;
+		info.width = w.width;
+		info.height = w.height;
+		info.resolution = std::max<uint32_t>(w.resolution, 2u);
+		info.receiver_z = w.receiver_z;
+		info.caustic_extent = w.caustic_extent;
+		info.caustic_intensity = w.caustic_intensity;
+		info.caustic_tint_set = w.caustic_tint_set;
+		if (w.caustic_tint_set) {
+			info.caustic_tint = glm::vec3(w.caustic_tint.x, w.caustic_tint.y, w.caustic_tint.z);
+		}
+		info.waves.reserve(w.waves.size());
+		for (auto const& wv : w.waves) {
+			WaterInfo::WaveOctave o;
+			o.amplitude = wv.amplitude;
+			o.frequency = wv.frequency;
+			o.direction = wv.direction;
+			o.speed     = wv.speed;
+			info.waves.push_back(o);
+		}
+
+		glm::vec3 wc = glm::vec3(world_glm * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+		if (w.room_aabb_set) {
+			info.room_min = glm::vec3(w.room_min.x, w.room_min.y, w.room_min.z);
+			info.room_max = glm::vec3(w.room_max.x, w.room_max.y, w.room_max.z);
+			info.room_aabb_set = true;
+		} else {
+			float half = w.caustic_extent * 0.5f;
+			info.room_min = glm::vec3(wc.x - half, wc.y - half, wc.z - 0.35f);
+			info.room_max = glm::vec3(wc.x + half, wc.y + half, w.receiver_z + 0.35f);
+			info.room_aabb_set = false;
+		}
+		if (info.room_min.x >= info.room_max.x || info.room_min.y >= info.room_max.y
+		    || info.room_min.z >= info.room_max.z) {
+			throw std::runtime_error("Water node \"" + node->name + "\" has invalid room AABB (min must be < max on each axis).");
+		}
+
+		waters.push_back(std::move(info));
+	}
+
 	for (S72::Node* child : node->children) {
 		traverse_node(child, world_glm, dynamic_here);
 	}
@@ -463,6 +506,23 @@ void SceneViewer::update_transforms_node(S72::Node* node, glm::mat4 const& paren
 
 void SceneViewer::build_scene_objects() {
 	object_instances.clear();
+	waters.clear();
+
+	// Reset directional sun/sky on world before traverse so scenes without a
+	// matching light do not inherit stale values from a previously loaded scene.
+	// (traverse_node overwrites these when it finds Sun nodes.)
+	world.SKY_DIRECTION.x = 0.0f;
+	world.SKY_DIRECTION.y = 0.0f;
+	world.SKY_DIRECTION.z = 1.0f;
+	world.SKY_ENERGY.r = 0.0f;
+	world.SKY_ENERGY.g = 0.0f;
+	world.SKY_ENERGY.b = 0.0f;
+	world.SUN_DIRECTION.x = 0.0f;
+	world.SUN_DIRECTION.y = 0.0f;
+	world.SUN_DIRECTION.z = 1.0f;
+	world.SUN_ENERGY.r = 0.0f;
+	world.SUN_ENERGY.g = 0.0f;
+	world.SUN_ENERGY.b = 0.0f;
 
 	glm::mat4 parent(1.0f);
 

@@ -8,6 +8,7 @@
 #include "RTG.hpp"
 #include "S72.hpp"
 
+#include <array>
 #include <fstream>
 #include <unordered_set>
 #include <memory>
@@ -25,7 +26,7 @@ struct Tutorial : RTG::Application {
 	~Tutorial();
 
 	// Maximum number of spot lights that can cast shadows simultaneously.
-	static constexpr uint32_t MAX_SHADOW_CASTERS = 8;
+	static constexpr uint32_t MAX_SHADOW_CASTERS = 7;
 
 	struct CPUTimer {
 		using clock = std::chrono::steady_clock;
@@ -120,7 +121,7 @@ struct Tutorial : RTG::Application {
 		static_assert(sizeof(Transform) == 16*4 + 16*4 + 16*4, "Transform is the expected size.");
 
 		struct Material {
-			struct { float r, g, b, padding_;} ALBEDO;
+			struct { float r, g, b, padding_;} ALBEDO; // padding_ = 1 for pbr:water (procedural waves in frag)
 			struct {float ROUGHNESS, METALLIC, padding2_, padding3_;} PBR;
 			uint32_t TYPE, padding1_, padding2_, padding3_;
 		};
@@ -139,6 +140,22 @@ struct Tutorial : RTG::Application {
 		};
 		static_assert(sizeof(ShadowMatricesUniform) == MAX_SHADOW_CASTERS * 64,
 		              "ShadowMatricesUniform is the expected size.");
+
+		// Caustic apply uniform — tells the main pass how to project a world
+		// XY into the caustic map.  One shared map across all waters, so
+		// objects.frag samples it once per fragment.
+		struct CausticApplyUniform {
+			// x,y,z reserved / unused for six-face mode; w = 1 if caustics active
+			glm::vec4 CENTER_EXTENT_ACTIVE;
+			// x = water node world z (reference plane); y = receiver_z;
+			// z = world half-thickness of water slab (caustics off horizontal sheet)
+			glm::vec4 WATER_Z_RECEIVER_Z;
+			glm::vec4 ROOM_MIN;
+			glm::vec4 ROOM_MAX;
+			// rgb scales reflected caustics when the scene has no sun (e.g. sphere light)
+			glm::vec4 CAUSTIC_TINT;
+		};
+		static_assert(sizeof(CausticApplyUniform) == 5 * 16, "CausticApplyUniform std140 size");
 
 		//no push constants for main pipeline
 
@@ -164,6 +181,69 @@ struct Tutorial : RTG::Application {
 		void create(RTG &, VkRenderPass shadow_render_pass);
 		void destroy(RTG &);
 	} shadow_pipeline;
+
+	// Caustic photon-splatting pipeline.  Draws a procedurally-generated
+	// water grid into a 2D R16_SFLOAT caustic map: each vertex computes its
+	// reflected ray and outputs the intersection with the receiver plane as
+	// a clip-space position.  Additive blending accumulates overlapping
+	// triangles into bright focus spots.
+	struct CausticPipeline {
+		VkDescriptorSetLayout set0_WaterParams = VK_NULL_HANDLE;
+		VkPipelineLayout layout = VK_NULL_HANDLE;
+		VkPipeline handle = VK_NULL_HANDLE;
+
+		// std140 uniform buffer; matches `WaterParams` in caustic.vert.
+		struct WaterParamsUniform {
+			glm::mat4 WORLD_FROM_LOCAL;
+			glm::vec4 SIZE_RES_RECV;   // width, height, resolution, receiver_z (legacy)
+			glm::vec4 CAUSTIC_CEI;     // center.xy, extent, intensity
+			glm::vec4 SUN_TIME;        // surface->sun dir.xyz, time
+			glm::vec4 WAVE_COUNT;      // count, pad, pad, pad
+			glm::vec4 WAVES[4];        // amplitude, frequency, direction, speed
+			glm::vec4 ROOM_MIN;        // xyz = world AABB min for six-face caustics
+			glm::vec4 ROOM_MAX;        // xyz = world AABB max
+			// xyz = world position for point-light caustics; w = 1 sphere, 0 sun (SUN_TIME.xyz)
+			glm::vec4 CAUSTIC_LIGHT_POINT;
+			// x = normal-map detail weight, y = UV tiling, z = use_nm (1/0), w unused
+			glm::vec4 WATER_NM;
+		};
+		static_assert(sizeof(WaterParamsUniform) == 256, "WaterParamsUniform std140 size");
+
+		// First water surface: shared waves + transforms for objects.frag (PBR water)
+		// and matching caustic WATER_NM / normal texture when enabled.
+		struct WaterSurfaceUniform {
+			glm::mat4 WORLD_FROM_LOCAL;
+			glm::mat4 LOCAL_FROM_WORLD;
+			glm::vec4 SIZE_TIME_BLEND; // width, height, time, unused (NM: WAVE_COUNT.yzw)
+			glm::vec4 WAVE_COUNT;
+			glm::vec4 WAVES[4];
+			glm::vec4 ACTIVE; // x = 1 if valid
+		};
+		static_assert(sizeof(WaterSurfaceUniform) == 240, "WaterSurfaceUniform std140 size");
+
+		void create(RTG &, VkRenderPass caustic_render_pass);
+		void destroy(RTG &);
+	} caustic_pipeline;
+
+	// Render pass for the caustic accumulation pass.  Single R16_SFLOAT
+	// color attachment cleared to 0 at pass start and loaded as sampled
+	// image afterwards.
+	VkRenderPass caustic_render_pass = VK_NULL_HANDLE;
+
+	// Sampler for reading the caustic map in objects.frag.  Linear + clamp.
+	VkSampler caustic_sampler = VK_NULL_HANDLE;
+
+	// Dimensions of the caustic map (edge length; square image).
+	// Higher resolution reduces internal caustic-map aliasing when projected
+	// onto walls at grazing angles (cost: 6× passes × pixels).
+	static constexpr uint32_t CAUSTIC_MAP_SIZE = 1024;
+	// Six axis-aligned room faces -> six layers in the caustic texture array.
+	static constexpr uint32_t CAUSTIC_ROOM_FACE_COUNT = 6;
+
+	// Max number of water surfaces supported per scene (upper bound on the
+	// caustic-pass draw loop).  Only one caustic map is generated; multiple
+	// waters accumulate into the same target.
+	static constexpr uint32_t MAX_WATER_SURFACES = 4;
 
 	// Render pass for shadow map generation:
 	//   attachment 0 – R32_SFLOAT color (the shadow map, sampled in main pass)
@@ -237,6 +317,28 @@ struct Tutorial : RTG::Application {
 		Helpers::AllocatedBuffer ShadowMatrices_src; // host coherent; mapped
 		Helpers::AllocatedBuffer ShadowMatrices;     // device-local
 		// (referenced from World_descriptors binding 6 after allocation)
+
+		// Caustic apply uniform (for main pass binding 8 on set0_World):
+		Helpers::AllocatedBuffer CausticApply_src; //host coherent; mapped
+		Helpers::AllocatedBuffer CausticApply;     //device-local
+
+		// Water surface waves (binding 9 on set0_World, objects.frag):
+		Helpers::AllocatedBuffer WaterSurface_src;
+		Helpers::AllocatedBuffer WaterSurface;
+
+		//---- caustic-pass per-workspace resources ----
+		// Packed array of WaterParams uniforms (one per water, aligned to
+		// minUniformBufferOffsetAlignment).  Used with a dynamic-offset
+		// descriptor so a single set is rebound per draw.
+		Helpers::AllocatedBuffer CausticWater_src; // host coherent; mapped
+		Helpers::AllocatedBuffer CausticWater;     // device-local
+		VkDescriptorSet CausticWater_descriptors = VK_NULL_HANDLE; // set0 for caustic pipeline
+
+		// R16_SFLOAT caustic accumulation: 2D array (one layer per room face).
+		Helpers::AllocatedImage caustic_map;
+		std::array< VkImageView, CAUSTIC_ROOM_FACE_COUNT > caustic_map_layer_views{};
+		VkImageView caustic_map_array_view = VK_NULL_HANDLE;
+		std::array< VkFramebuffer, CAUSTIC_ROOM_FACE_COUNT > caustic_framebuffers{};
 	};
 	std::vector< Workspace > workspaces;
 
@@ -299,7 +401,15 @@ struct Tutorial : RTG::Application {
 		float far = 1000.0f; //far clipping plane
 	};
 
-	OrbitCamera free_camera;
+	// Default pose matches caustic-pool.s72 Pool-Camera: eye at (0,-28,6),
+	// looking toward +Y (into the open side of the room).
+	OrbitCamera free_camera{
+		.target_x = 0.0f, .target_y = 0.0f, .target_z = 6.0f,
+		.radius = 28.0f,
+		.azimuth = -0.5f * float(M_PI),
+		.elevation = 0.0f,
+		.fov = 0.9f,
+	};
 	//
 	OrbitCamera debug_camera;
 
@@ -317,6 +427,11 @@ struct Tutorial : RTG::Application {
 
 	VkQueryPool timestamp_query_pool = VK_NULL_HANDLE;
 	float timestamp_period = 0.0f;
+
+	// Stride (in bytes) between consecutive WaterParamsUniform entries in the
+	// per-workspace CausticWater buffer, rounded up to the device's
+	// minUniformBufferOffsetAlignment so it can be used as a dynamic offset.
+	uint32_t caustic_uniform_stride = 0;
 
 	//--------------------------------------------------------------------
 	//Rendering function, uses all the resources above to queue work to draw a frame:

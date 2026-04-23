@@ -16,7 +16,7 @@ void Tutorial::ObjectsPipeline::create(RTG &rtg, VkRenderPass render_pass, uint3
     VkShaderModule frag_module = rtg.helpers.create_shader_module(frag_code);
 
     { //the set0_World layout holds world info in a uniform buffer and the environment cubemap sampler used in the fragment shader:
-        std::array< VkDescriptorSetLayoutBinding, 7 > bindings{
+        std::array< VkDescriptorSetLayoutBinding, 10 > bindings{
 			VkDescriptorSetLayoutBinding{
 				.binding = 0,
 				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -57,6 +57,27 @@ void Tutorial::ObjectsPipeline::create(RTG &rtg, VkRenderPass render_pass, uint3
             // binding 6: shadow matrices uniform buffer (CLIP_FROM_WORLD per shadow light)
             VkDescriptorSetLayoutBinding{
                 .binding = 6,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
+            // binding 7: caustic accumulation map (R16_SFLOAT), produced by the caustic pass
+            VkDescriptorSetLayoutBinding{
+                .binding = 7,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
+            // binding 8: per-frame caustic transform (world XY center + extent + intensity)
+            VkDescriptorSetLayoutBinding{
+                .binding = 8,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
+            // binding 9: first water surface — procedural waves (+ NM blend) for pbr:water
+            VkDescriptorSetLayoutBinding{
+                .binding = 9,
                 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,

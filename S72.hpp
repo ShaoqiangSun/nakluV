@@ -69,6 +69,7 @@ struct S72 {
 	struct Material;
 	struct Environment;
 	struct Light;
+	struct Water;
 
 	//-------------------------------------------------
 	//s72 Scenes contain:
@@ -98,6 +99,7 @@ struct S72 {
 		Camera *camera = nullptr;
 		Environment *environment = nullptr;
 		Light *light = nullptr;
+		Water *water = nullptr;
 	};
 	std::unordered_map< std::string, Node > nodes;
 
@@ -260,4 +262,52 @@ struct S72 {
 		std::variant< Sun, Sphere, Spot > source;
 	};
 	std::unordered_map< std::string, Light > lights;
+
+	//zero or more "WATER"s, all with unique names.
+	//A WATER describes an animated water surface that produces reflection caustics.
+	struct Water {
+		std::string name;
+
+		//surface footprint (in the node's local XY plane, centered at the origin):
+		float width = 10.0f;
+		float height = 10.0f;
+
+		//number of vertices per side used when splatting photons:
+		uint32_t resolution = 64;
+
+		//world-space Z of the horizontal receiver plane that captures caustics
+		//(e.g. a ceiling above the water); caustic irradiance is accumulated there
+		//and then sampled by any shaded point with world Z >= water's Z.
+		float receiver_z = 5.0f;
+
+		//world-space size of the caustic map footprint (in XY, centered on the
+		//water node). larger values spread the caustic further out; smaller
+		//values yield a sharper, more concentrated pattern.
+		float caustic_extent = 12.0f;
+
+		//multiplier on the accumulated irradiance when applied to receivers:
+		float caustic_intensity = 1.0f;
+
+		// Optional linear RGB tint for *applied* wall/ceiling caustics (main pass).
+		// When unset, Tutorial derives tint from SUN_ENERGY or the first sphere light.
+		bool caustic_tint_set = false;
+		vec3 caustic_tint{1.0f, 1.0f, 1.0f};
+
+		// Optional axis-aligned room (world space) for six-face reflection caustics.
+		// When both are set, receiver planes are the six faces of this AABB.
+		// When unset, SceneViewer derives a box from caustic_extent and receiver_z.
+		bool room_aabb_set = false;
+		vec3 room_min{0.0f};
+		vec3 room_max{0.0f};
+
+		//gerstner wave octaves (up to 4). all omitted -> flat water.
+		struct WaveOctave {
+			float amplitude = 0.05f; // metres
+			float frequency = 1.0f;  // radians / metre (spatial frequency)
+			float direction = 0.0f;  // radians, CCW from +X
+			float speed = 1.0f;      // radians / second (temporal frequency)
+		};
+		std::vector< WaveOctave > waves;
+	};
+	std::unordered_map< std::string, Water > waters;
 };

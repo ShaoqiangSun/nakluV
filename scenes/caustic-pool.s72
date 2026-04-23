@@ -1,0 +1,168 @@
+["s72-v2",
+{
+	"type":"MATERIAL",
+	"name":"lambertian:dark-grey",
+	"lambertian":{
+		"albedo":[0.1, 0.1, 0.1]
+	}
+},
+{
+	"type":"MATERIAL",
+	"name":"lambertian:water-blue",
+	"lambertian":{
+		"albedo":[0.08, 0.25, 0.45]
+	}
+},
+{
+	"type":"MATERIAL",
+	"name":"pbr:water",
+	"pbr":{
+		"albedo":[0.1, 0.105, 0.14],
+		"roughness":0.07,
+		"metalness":0
+	}
+},
+{
+	"type":"MESH",
+	"name":"Cube-White",
+	"topology":"TRIANGLE_LIST",
+	"count":36,
+	"attributes":{
+		"POSITION":{ "src":"lights-Spot-Shadows.Cube.pnTt.b72", "offset":0,  "stride":48, "format":"R32G32B32_SFLOAT" },
+		"NORMAL":  { "src":"lights-Spot-Shadows.Cube.pnTt.b72", "offset":12, "stride":48, "format":"R32G32B32_SFLOAT" },
+		"TANGENT": { "src":"lights-Spot-Shadows.Cube.pnTt.b72", "offset":24, "stride":48, "format":"R32G32B32A32_SFLOAT" },
+		"TEXCOORD":{ "src":"lights-Spot-Shadows.Cube.pnTt.b72", "offset":40, "stride":48, "format":"R32G32_SFLOAT" }
+	},
+	"material":"lambertian:dark-grey"
+},
+{
+	"type":"MESH",
+	"name":"Cube-Water",
+	"topology":"TRIANGLE_LIST",
+	"count":36,
+	"attributes":{
+		"POSITION":{ "src":"lights-Spot-Shadows.Cube.pnTt.b72", "offset":0,  "stride":48, "format":"R32G32B32_SFLOAT" },
+		"NORMAL":  { "src":"lights-Spot-Shadows.Cube.pnTt.b72", "offset":12, "stride":48, "format":"R32G32B32_SFLOAT" },
+		"TANGENT": { "src":"lights-Spot-Shadows.Cube.pnTt.b72", "offset":24, "stride":48, "format":"R32G32B32A32_SFLOAT" },
+		"TEXCOORD":{ "src":"lights-Spot-Shadows.Cube.pnTt.b72", "offset":40, "stride":48, "format":"R32G32_SFLOAT" }
+	},
+	"material":"pbr:water"
+},
+{
+	"type":"NODE",
+	"name":"Pool-Back-Wall",
+	"translation":[0, 10.3, 6],
+	"rotation":[0, 0, 0, 1],
+	"scale":[10, 0.3, 6],
+	"mesh":"Cube-White"
+},
+{
+	"type":"NODE",
+	"name":"Pool-Left-Wall",
+	"translation":[-10.3, 0, 6],
+	"rotation":[0, 0, 0, 1],
+	"scale":[0.3, 10, 6],
+	"mesh":"Cube-White"
+},
+{
+	"type":"NODE",
+	"name":"Pool-Right-Wall",
+	"translation":[10.3, 0, 6],
+	"rotation":[0, 0, 0, 1],
+	"scale":[0.3, 10, 6],
+	"mesh":"Cube-White"
+},
+{
+	"type":"NODE",
+	"name":"Pool-Ceiling",
+	"translation":[0, 0, 12.5],
+	"rotation":[0, 0, 0, 1],
+	"scale":[10, 10, 0.5],
+	"mesh":"Cube-White"
+},
+{
+	"type":"NODE",
+	"name":"Water-Visual",
+	"translation":[0, 0, 0.1],
+	"rotation":[0, 0, 0, 1],
+	"scale":[10, 10, 0.05],
+	"mesh":"Cube-Water"
+},
+{
+	"type":"WATER",
+	"name":"Pool-Water",
+	"width":10,
+	"height":10,
+	"resolution":128,
+	"receiver_z":12,
+	"caustic_extent":22,
+	"caustic_intensity":800,
+	"caustic_tint":[2.35, 1.55, 0.62],
+	"room_min":[-10,-10,0],
+	"room_max":[10,10,12],
+	"waves":[
+		{ "amplitude":0.12, "frequency":0.7, "direction":0.0, "speed":1.0 },
+		{ "amplitude":0.08, "frequency":1.1, "direction":1.2, "speed":1.3 },
+		{ "amplitude":0.05, "frequency":1.7, "direction":2.5, "speed":0.8 },
+		{ "amplitude":0.03, "frequency":2.4, "direction":0.6, "speed":1.6 }
+	]
+},
+{
+	"type":"NODE",
+	"name":"Pool-Water",
+	"translation":[0, 0, 0.1],
+	"rotation":[0, 0, 0, 1],
+	"scale":[1, 1, 1],
+	"water":"Pool-Water"
+},
+{
+	"type":"LIGHT",
+	"name":"Room-Lamp",
+	"tint":[2.35, 1.55, 0.62],
+	"sphere":{
+		"radius":0.12,
+		"power":300,
+		"limit":50
+	}
+},
+{
+	"type":"NODE",
+	"name":"Room-Lamp",
+	"translation":[0, 6, 2],
+	"rotation":[0, 0, 0, 1],
+	"scale":[1, 1, 1],
+	"light":"Room-Lamp"
+},
+{
+	"type":"CAMERA",
+	"name":"Pool-Camera",
+	"perspective":{
+		"aspect":1.6,
+		"vfov":0.9,
+		"near":0.1,
+		"far":1000
+	}
+},
+{
+	"type":"NODE",
+	"name":"Pool-Camera",
+	"translation":[0, -28, 6],
+	"rotation":[0.70710678, 0, 0, 0.70710678],
+	"scale":[1, 1, 1],
+	"camera":"Pool-Camera"
+},
+{
+	"type":"SCENE",
+	"name":"caustic-pool",
+	"roots":[
+		"Pool-Back-Wall",
+		"Pool-Left-Wall",
+		"Pool-Right-Wall",
+		"Pool-Ceiling",
+		"Water-Visual",
+		"Pool-Water",
+		"Room-Lamp",
+		"Pool-Camera"
+	]
+}
+]

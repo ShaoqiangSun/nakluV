@@ -1,5 +1,7 @@
 #version 450
 
+#include "water_waves.glsl"
+
 const uint LIGHT_SUN    = 0u;
 const uint LIGHT_SPHERE = 1u;
 const uint LIGHT_SPOT   = 2u;
@@ -7,7 +9,7 @@ const uint LIGHT_SPOT   = 2u;
 const float PI = 3.14159265359;
 
 // Maximum number of shadow-casting spot lights
-const int MAX_SHADOW_CASTERS = 8;
+const int MAX_SHADOW_CASTERS = 7;
 
 struct Light {
     vec4 POSITION_TYPE;
@@ -41,6 +43,134 @@ layout(set=0,binding=5) uniform sampler2D SHADOW_MAPS[MAX_SHADOW_CASTERS];
 layout(set=0,binding=6,std140) uniform ShadowBlock {
     mat4 LIGHT_FROM_WORLD[MAX_SHADOW_CASTERS];
 } SHADOW_DATA;
+// Six-face caustic map (R16 per layer).  Layers: 0=xmax,1=xmin,2=ymax,3=ymin,4=zmax,5=zmin.
+layout(set=0,binding=7) uniform sampler2DArray CAUSTIC_MAP;
+layout(set=0,binding=8,std140) uniform CausticApplyBlock {
+    // w = 1.0 if caustics are active this frame, else 0.0
+    vec4 CENTER_EXTENT_ACTIVE;
+    // x = water reference z; y = receiver_z; z = slab half-thickness (see sample_caustic)
+    vec4 WATER_Z_RECEIVER_Z;
+    vec4 ROOM_MIN;
+    vec4 ROOM_MAX;
+    vec4 CAUSTIC_TINT; // rgb scales caustic term; if ~zero, fall back to SUN_ENERGY
+} CAUSTIC_APPLY;
+
+// First scene water: same waves as caustic.vert (ALBEDO.w flags pbr:water material).
+layout(set=0,binding=9,std140) uniform WaterSurfaceBlock {
+    mat4 WATER_WORLD_FROM_LOCAL;
+    mat4 WATER_LOCAL_FROM_WORLD;
+    vec4 WATER_SIZE_TIME_BLEND;
+    vec4 WATER_WAVE_COUNT; // x=wave count; y=NM UV scale; z=NM xy strength; w=use NM (1/0)
+    vec4 WATER_WAVES[4];
+    vec4 WATER_ACTIVE;
+} WATER_SURFACE;
+
+vec3 caustic_irradiance_scale() {
+    vec3 e = CAUSTIC_APPLY.CAUSTIC_TINT.rgb;
+    if (dot(e, e) > 1e-12) return e;
+    return SUN_ENERGY;
+}
+
+// UV for one room face layer (same layout as caustic pass / old sample_caustic).
+vec2 caustic_uv_for_layer(vec3 P, vec3 mn, vec3 mx, int layer) {
+    float ex = mx.x - mn.x;
+    float ey = mx.y - mn.y;
+    float ez = mx.z - mn.z;
+    if (layer <= 1) {
+        if (ey < 1e-6 || ez < 1e-6) return vec2(-1.0);
+        return vec2((P.y - mn.y) / ey, (P.z - mn.z) / ez);
+    }
+    if (layer <= 3) {
+        if (ex < 1e-6 || ez < 1e-6) return vec2(-1.0);
+        return vec2((P.x - mn.x) / ex, (P.z - mn.z) / ez);
+    }
+    if (ex < 1e-6 || ey < 1e-6) return vec2(-1.0);
+    return vec2((P.x - mn.x) / ex, (P.y - mn.y) / ey);
+}
+
+// Fade caustics to 0 near the projected face boundary (UV → 0/1). Masks
+// aliasing / clamp-border artifacts at wall–wall and wall–ceiling seams.
+float caustic_edge_fade(vec2 uv, float margin) {
+    float d = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    return smoothstep(0.0, margin, d);
+}
+
+// Single tap; must stay in (0,1)² so blur taps do not read clamp-border garbage.
+float caustic_sample_tap(vec2 uv, int layer, float margin) {
+    if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0) return 0.0;
+    float edge = caustic_edge_fade(uv, margin);
+    return edge * max(0.0, texture(CAUSTIC_MAP, vec3(uv, float(layer))).r);
+}
+
+// Small blur in caustic-map texel space to suppress radial “spokes” from the
+// water mesh triangulation / discrete splats (not physical caustic detail).
+float caustic_fetch_layer(vec3 P, vec3 mn, vec3 mx, int layer) {
+    vec2 uv = caustic_uv_for_layer(P, mn, mx, layer);
+    if (uv.x < 0.0) return 0.0;
+    if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0) return 0.0;
+
+    const float CAUSTIC_EDGE_MARGIN = 2.0;
+    ivec2 tsz = textureSize(CAUSTIC_MAP, 0).xy;
+    vec2 px = vec2(1.0 / max(float(tsz.x), 1.0), 1.0 / max(float(tsz.y), 1.0));
+    // Widen (e.g. 3.0) if thin lines remain; narrow for sharper caustics.
+    vec2 ofs = px * 2.2;
+
+    float c = caustic_sample_tap(uv, layer, CAUSTIC_EDGE_MARGIN) * 0.46;
+    c += caustic_sample_tap(uv + vec2(ofs.x, 0.0), layer, CAUSTIC_EDGE_MARGIN) * 0.135;
+    c += caustic_sample_tap(uv - vec2(ofs.x, 0.0), layer, CAUSTIC_EDGE_MARGIN) * 0.135;
+    c += caustic_sample_tap(uv + vec2(0.0, ofs.y), layer, CAUSTIC_EDGE_MARGIN) * 0.135;
+    c += caustic_sample_tap(uv - vec2(0.0, ofs.y), layer, CAUSTIC_EDGE_MARGIN) * 0.135;
+    return c;
+}
+
+float sample_caustic(vec3 P, vec3 n) {
+    if (CAUSTIC_APPLY.CENTER_EXTENT_ACTIVE.w < 0.5) return 0.0;
+
+    float water_cz = CAUSTIC_APPLY.WATER_Z_RECEIVER_Z.x;
+    float water_half_z = CAUSTIC_APPLY.WATER_Z_RECEIVER_Z.z;
+    // Below pool: no reflected caustics (legacy receiver test).
+    if (P.z < water_cz + 1e-3) return 0.0;
+    // Horizontal water surface: do not tint with *reflected* ceiling/wall caustics
+    // (x was node center; actual surface is a thin slab above center).
+    if (water_half_z > 1e-5 && abs(P.z - water_cz) < water_half_z && n.z > 0.55)
+        return 0.0;
+
+    vec3 mn = CAUSTIC_APPLY.ROOM_MIN.xyz;
+    vec3 mx = CAUSTIC_APPLY.ROOM_MAX.xyz;
+
+    // Outside the room AABB (e.g. the outward side of a wall/ceiling/floor):
+    // never receive reflection caustics — the caustic map is only valid inside.
+    const float CAUSTIC_ROOM_EPS = 0.02;
+    if (P.x < mn.x - CAUSTIC_ROOM_EPS || P.x > mx.x + CAUSTIC_ROOM_EPS ||
+        P.y < mn.y - CAUSTIC_ROOM_EPS || P.y > mx.y + CAUSTIC_ROOM_EPS ||
+        P.z < mn.z - CAUSTIC_ROOM_EPS || P.z > mx.z + CAUSTIC_ROOM_EPS) {
+        return 0.0;
+    }
+
+    n = normalize(n);
+    // Soft blend across the six room faces so creases (wall–wall, wall–ceiling)
+    // do not hard-switch caustic layers (that produced stair-step aliasing).
+    const float k = 3.5;
+    float w0 = pow(max(0.0, -n.x), k); // layer 0: xmax wall (inward -X)
+    float w1 = pow(max(0.0,  n.x), k); // layer 1: xmin
+    float w2 = pow(max(0.0, -n.y), k); // layer 2: ymax
+    float w3 = pow(max(0.0,  n.y), k); // layer 3: ymin
+    float w4 = pow(max(0.0, -n.z), k); // layer 4: zmax (ceiling when +Z is up)
+    float w5 = pow(max(0.0,  n.z), k); // layer 5: zmin (floor)
+    float wsum = w0 + w1 + w2 + w3 + w4 + w5;
+    if (wsum < 1e-6) return 0.0;
+
+    float c = 0.0;
+    c += w0 * caustic_fetch_layer(P, mn, mx, 0);
+    c += w1 * caustic_fetch_layer(P, mn, mx, 1);
+    c += w2 * caustic_fetch_layer(P, mn, mx, 2);
+    c += w3 * caustic_fetch_layer(P, mn, mx, 3);
+    c += w4 * caustic_fetch_layer(P, mn, mx, 4);
+    c += w5 * caustic_fetch_layer(P, mn, mx, 5);
+    c /= wsum;
+
+    return c;
+}
 
 //layout(set=2,binding=0) uniform sampler2D TEXTURE;
 layout(set=2,binding=0,std140) uniform MaterialParams {
@@ -398,6 +528,28 @@ void main() {
 
     vec3 n = normalize(TBN * normalize(n_ts));
 
+    if (TYPE == 3u && ALBEDO.w > 0.5 && WATER_SURFACE.WATER_ACTIVE.x > 0.5) {
+        vec4 lw = WATER_SURFACE.WATER_LOCAL_FROM_WORLD * vec4(position, 1.0);
+        vec3 disp_l;
+        vec3 n_local_proc;
+        water_waves_disp_and_normal(lw.xy, WATER_SURFACE.WATER_SIZE_TIME_BLEND.z,
+            WATER_SURFACE.WATER_WAVE_COUNT, WATER_SURFACE.WATER_WAVES, disp_l, n_local_proc);
+        vec3 n_local = n_local_proc;
+        // Same normal-map rule as caustic.vert (local tangent plane, xy perturb).
+        if (WATER_SURFACE.WATER_WAVE_COUNT.w > 0.5) {
+            float tile = max(WATER_SURFACE.WATER_WAVE_COUNT.y, 1e-6);
+            vec2 tuv = lw.xy * tile;
+            vec3 tsn = texture(NORMAL_TEXTURE, tuv).xyz * 2.0 - 1.0;
+            float bw = clamp(WATER_SURFACE.WATER_WAVE_COUNT.z, 0.0, 1.0);
+            n_local = normalize(n_local_proc + vec3(tsn.xy * bw, 0.0));
+        }
+        mat3 M3 = mat3(WATER_SURFACE.WATER_WORLD_FROM_LOCAL);
+        float detM = determinant(M3);
+        n = (abs(detM) > 1e-8)
+            ? normalize(transpose(inverse(M3)) * n_local)
+            : normalize((WATER_SURFACE.WATER_WORLD_FROM_LOCAL * vec4(n_local, 0.0)).xyz);
+    }
+
     //vec3 n = normalize(normal);
 
     if (TYPE == 0u) {
@@ -417,6 +569,15 @@ void main() {
         vec3 direct_e = evaluate_direct_diffuse(position, n);
 
         vec3 radiance = (env_e + direct_e) * albedo;
+
+        // Reflected water caustics: treated as an extra diffuse irradiance
+        // term tinted by the sun colour.  This approximates the light that
+        // bounced off the wave surface onto walls/ceilings.
+        float caustic = sample_caustic(position, n);
+        if (caustic > 0.0) {
+            radiance += albedo * caustic * caustic_irradiance_scale() / PI;
+        }
+
         float exposure = TONE.x;
         uint op = uint(TONE.y + 0.5);
         vec3 mapped = apply_tonemapping(radiance, exposure, op);
@@ -491,7 +652,13 @@ void main() {
             specularIBL +
             kD * direct_diffuse * albedo +
             direct_specular;
-        
+
+        // Reflected water caustics add extra diffuse irradiance (sun-coloured).
+        float caustic = sample_caustic(position, n);
+        if (caustic > 0.0) {
+            radiance += kD * albedo * caustic * caustic_irradiance_scale() / PI;
+        }
+
         float exposure = TONE.x;
         uint op = uint(TONE.y + 0.5);
         vec3 mapped = apply_tonemapping(radiance, exposure, op);

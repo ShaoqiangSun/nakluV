@@ -16,7 +16,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-
 static inline glm::mat4 to_glm(mat4 const& m) {
     glm::mat4 out;
     static_assert(sizeof(out) == sizeof(mat4), "sizes must match");
@@ -334,6 +333,68 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		VK( vkCreateRenderPass(rtg.device, &create_info, nullptr, &shadow_render_pass) );
 	}
 
+	{ // Caustic render pass
+		// Single R16_SFLOAT color attachment, cleared to 0 at the start of
+		// each frame.  No depth attachment: caustic photon splats are blended
+		// additively without a depth test.  The final layout is
+		// SHADER_READ_ONLY_OPTIMAL so the main pass can sample the map.
+		VkAttachmentDescription color_attachment{
+			.format = VK_FORMAT_R16_SFLOAT,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		};
+
+		VkAttachmentReference color_ref{
+			.attachment = 0,
+			.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		};
+
+		VkSubpassDescription subpass{
+			.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+			.colorAttachmentCount = 1,
+			.pColorAttachments = &color_ref,
+			.pDepthStencilAttachment = nullptr,
+		};
+
+		// Wait for the previous frame's main pass to finish sampling before
+		// we start writing again; and have the subsequent main pass wait
+		// for our writes to complete before sampling the caustic map.
+		std::array< VkSubpassDependency, 2 > dependencies{
+			VkSubpassDependency{
+				.srcSubpass = VK_SUBPASS_EXTERNAL,
+				.dstSubpass = 0,
+				.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+				.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+				.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			},
+			VkSubpassDependency{
+				.srcSubpass = 0,
+				.dstSubpass = VK_SUBPASS_EXTERNAL,
+				.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+				.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+			},
+		};
+
+		VkRenderPassCreateInfo create_info{
+			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+			.attachmentCount = 1,
+			.pAttachments = &color_attachment,
+			.subpassCount = 1,
+			.pSubpasses = &subpass,
+			.dependencyCount = uint32_t(dependencies.size()),
+			.pDependencies = dependencies.data(),
+		};
+		VK( vkCreateRenderPass(rtg.device, &create_info, nullptr, &caustic_render_pass) );
+	}
+
 	{ //create command pool
 		VkCommandPoolCreateInfo create_info{
 			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -348,6 +409,13 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		vkGetPhysicalDeviceProperties(rtg.physical_device, &props);
 		timestamp_period = props.limits.timestampPeriod;
 
+		// Align WaterParamsUniform size up to the device's required
+		// alignment for dynamic uniform buffer offsets.
+		uint32_t raw_size = uint32_t(sizeof(CausticPipeline::WaterParamsUniform));
+		uint32_t align = uint32_t(props.limits.minUniformBufferOffsetAlignment);
+		if (align == 0) align = 1;
+		caustic_uniform_stride = ((raw_size + align - 1) / align) * align;
+
 		VkQueryPoolCreateInfo qpci{
 			.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
 			.queryType = VK_QUERY_TYPE_TIMESTAMP,
@@ -360,6 +428,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 	lines_pipeline.create(rtg, render_pass, 0);
 	objects_pipeline.create(rtg, render_pass, 0);
 	shadow_pipeline.create(rtg, shadow_render_pass);
+	caustic_pipeline.create(rtg, caustic_render_pass);
 
 	{ // create sampler for shadow maps
 		// compareEnable must be VK_FALSE on macOS/MoltenVK (portability subset:
@@ -383,6 +452,27 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 			.unnormalizedCoordinates = VK_FALSE,
 		};
 		VK( vkCreateSampler(rtg.device, &create_info, nullptr, &shadow_sampler) );
+	}
+
+	{ // caustic sampler: linear filtering + clamp-to-border with 0 border so
+	  // sampling outside the caustic map footprint returns no contribution.
+		VkSamplerCreateInfo create_info{
+			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+			.magFilter = VK_FILTER_LINEAR,
+			.minFilter = VK_FILTER_LINEAR,
+			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+			.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+			.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+			.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+			.mipLodBias = 0.0f,
+			.anisotropyEnable = VK_FALSE,
+			.compareEnable = VK_FALSE,
+			.minLod = 0.0f,
+			.maxLod = 0.0f,
+			.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+			.unnormalizedCoordinates = VK_FALSE,
+		};
+		VK( vkCreateSampler(rtg.device, &create_info, nullptr, &caustic_sampler) );
 	}
 
 	{ //make image views for the textures
@@ -453,11 +543,11 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 
 	{ //create descriptor pool:
 		uint32_t per_workspace = uint32_t(rtg.workspaces.size());  //for easier-to-read counting
-		std::array< VkDescriptorPoolSize, 3> pool_sizes{
+		std::array< VkDescriptorPoolSize, 4> pool_sizes{
 			VkDescriptorPoolSize{
 				.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-				// Camera + World + ShadowMatrices
-				.descriptorCount = 3 * per_workspace,
+				// Camera + World + ShadowMatrices + CausticApply + WaterSurface
+				.descriptorCount = 5 * per_workspace,
 			},
 			VkDescriptorPoolSize{
 				.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -466,16 +556,24 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 			},
 			VkDescriptorPoolSize{
 				.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-				// ENV + ENV_LAMBERTIAN + BRDF_LUT + MAX_SHADOW_CASTERS shadow maps
-				.descriptorCount = (3 + MAX_SHADOW_CASTERS) * per_workspace,
+				// ENV + ENV_LAMBERTIAN + BRDF_LUT + MAX_SHADOW_CASTERS shadow
+				// maps + 1 caustic map + 1 caustic water normal
+				.descriptorCount = (5 + MAX_SHADOW_CASTERS) * per_workspace,
+			},
+			VkDescriptorPoolSize{
+				.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+				// CausticWater (one per workspace, bound with dynamic offset
+				// per water surface).
+				.descriptorCount = 1 * per_workspace,
 			},
 		};
 
 		VkDescriptorPoolCreateInfo create_info{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 			.flags = 0, //because CREATE_FREE_DESCRIPTOR_SET_BIT isn't included, *can't* free individual descriptors allocated from this pool
-			// Camera + World + Transforms + AllWorldTransforms (shadow pipeline set0)
-			.maxSets = 4 * per_workspace,
+			// Camera + World + Transforms + AllWorldTransforms
+			// + CausticWater (caustic pipeline set0)
+			.maxSets = 5 * per_workspace,
 			.poolSizeCount = uint32_t(pool_sizes.size()),
 			.pPoolSizes = pool_sizes.data(),
 		};
@@ -584,6 +682,82 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 			// Descriptor for binding 6 will be written after shadow images are created.
 		}
 
+		{ // allocate fixed-size CausticApply buffers (size never changes)
+			workspace.CausticApply_src = rtg.helpers.create_buffer(
+				sizeof(ObjectsPipeline::CausticApplyUniform),
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				Helpers::Mapped
+			);
+			workspace.CausticApply = rtg.helpers.create_buffer(
+				sizeof(ObjectsPipeline::CausticApplyUniform),
+				VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+			// Descriptor for binding 8 is written below alongside bindings 5/6.
+		}
+
+		{ // WaterSurface UBO (objects.frag binding 9)
+			workspace.WaterSurface_src = rtg.helpers.create_buffer(
+				sizeof(CausticPipeline::WaterSurfaceUniform),
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				Helpers::Mapped
+			);
+			workspace.WaterSurface = rtg.helpers.create_buffer(
+				sizeof(CausticPipeline::WaterSurfaceUniform),
+				VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+		}
+
+		{ // allocate CausticWater buffers sized for MAX_WATER_SURFACES entries
+			VkDeviceSize total_size = VkDeviceSize(caustic_uniform_stride) * MAX_WATER_SURFACES;
+			workspace.CausticWater_src = rtg.helpers.create_buffer(
+				total_size,
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				Helpers::Mapped
+			);
+			workspace.CausticWater = rtg.helpers.create_buffer(
+				total_size,
+				VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+		}
+
+		{ // allocate descriptor set for caustic pipeline's set0 (dynamic UBO)
+			VkDescriptorSetAllocateInfo alloc_info{
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+				.descriptorPool = descriptor_pool,
+				.descriptorSetCount = 1,
+				.pSetLayouts = &caustic_pipeline.set0_WaterParams,
+			};
+			VK( vkAllocateDescriptorSets(rtg.device, &alloc_info, &workspace.CausticWater_descriptors) );
+
+			// Bind the CausticWater buffer to binding 0 with range =
+			// caustic_uniform_stride (single entry; dynamic offset picks
+			// which entry per draw).
+			VkDescriptorBufferInfo buf_info{
+				.buffer = workspace.CausticWater.handle,
+				.offset = 0,
+				.range  = VkDeviceSize(caustic_uniform_stride),
+			};
+			VkWriteDescriptorSet write{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = workspace.CausticWater_descriptors,
+				.dstBinding = 0,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+				.pBufferInfo = &buf_info,
+			};
+			vkUpdateDescriptorSets(rtg.device, 1, &write, 0, nullptr);
+		}
+
 
 
 		{ //point descriptor to Camera buffer:
@@ -597,6 +771,12 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				.buffer = workspace.World.handle,
 				.offset = 0,
 				.range = workspace.World.size,
+			};
+
+			VkDescriptorBufferInfo Water_surface_info{
+				.buffer = workspace.WaterSurface.handle,
+				.offset = 0,
+				.range = workspace.WaterSurface.size,
 			};
 
 			VkDescriptorImageInfo Env_info{
@@ -617,7 +797,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			};
 
-			std::array< VkWriteDescriptorSet, 5 > writes {
+			std::array< VkWriteDescriptorSet, 6 > writes {
 				VkWriteDescriptorSet{
 					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 					.dstSet = workspace.Camera_descriptors,
@@ -662,6 +842,15 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 					.descriptorCount = 1,
 					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 					.pImageInfo = &Brdf_Lut_info,
+				},
+				VkWriteDescriptorSet{
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = workspace.World_descriptors,
+					.dstBinding = 9,
+					.dstArrayElement = 0,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+					.pBufferInfo = &Water_surface_info,
 				},
 			};
 
@@ -785,6 +974,63 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		}
 	}
 
+	// Per-workspace caustic map: R16 2D array (6 layers = room faces), one
+	// framebuffer per layer for splat passes, plus a full-array view for sampling.
+	for (Workspace &workspace : workspaces) {
+		workspace.caustic_map = rtg.helpers.create_image(
+			VkExtent2D{ CAUSTIC_MAP_SIZE, CAUSTIC_MAP_SIZE },
+			VK_FORMAT_R16_SFLOAT,
+			VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			Helpers::Unmapped,
+			CAUSTIC_ROOM_FACE_COUNT
+		);
+
+		for (uint32_t layer = 0; layer < CAUSTIC_ROOM_FACE_COUNT; ++layer) {
+			VkImageViewCreateInfo layer_view{
+				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+				.image = workspace.caustic_map.handle,
+				.viewType = VK_IMAGE_VIEW_TYPE_2D,
+				.format = VK_FORMAT_R16_SFLOAT,
+				.subresourceRange{
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.baseMipLevel = 0,
+					.levelCount = 1,
+					.baseArrayLayer = layer,
+					.layerCount = 1,
+				},
+			};
+			VK( vkCreateImageView(rtg.device, &layer_view, nullptr, &workspace.caustic_map_layer_views[layer]) );
+
+			VkFramebufferCreateInfo fb_info{
+				.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+				.renderPass = caustic_render_pass,
+				.attachmentCount = 1,
+				.pAttachments = &workspace.caustic_map_layer_views[layer],
+				.width = CAUSTIC_MAP_SIZE,
+				.height = CAUSTIC_MAP_SIZE,
+				.layers = 1,
+			};
+			VK( vkCreateFramebuffer(rtg.device, &fb_info, nullptr, &workspace.caustic_framebuffers[layer]) );
+		}
+
+		VkImageViewCreateInfo array_view{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = workspace.caustic_map.handle,
+			.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+			.format = VK_FORMAT_R16_SFLOAT,
+			.subresourceRange{
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = CAUSTIC_ROOM_FACE_COUNT,
+			},
+		};
+		VK( vkCreateImageView(rtg.device, &array_view, nullptr, &workspace.caustic_map_array_view) );
+	}
+
 	// Dummy 1×1 R32_SFLOAT image (value 1.0 = fully lit) for unused shadow map slots.
 	dummy_shadow_image = rtg.helpers.create_image(
 		VkExtent2D{1, 1},
@@ -899,7 +1145,24 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		vkFreeCommandBuffers(rtg.device, command_pool, 1, &init_cmd);
 	}
 
-	// Update World_descriptors bindings 5 (shadow maps) and 6 (shadow matrices) for every workspace.
+	// Optional water normal map for caustic.vert (binding 1); default flat normal
+	// when pbr:water has no normalMap.
+	VkImageView caustic_water_nrm_view =
+		material_system.texture_views[material_system.default_normal_texture_index];
+	{
+		auto itmw = scene_viewer->s72.materials.find("pbr:water");
+		if (itmw != scene_viewer->s72.materials.end()
+		    && itmw->second.normal_map != nullptr) {
+			auto tid = material_system.texture_id.find(itmw->second.normal_map);
+			if (tid != material_system.texture_id.end()
+			    && tid->second < material_system.texture_views.size()) {
+				caustic_water_nrm_view = material_system.texture_views[tid->second];
+			}
+		}
+	}
+
+	// Update World_descriptors bindings 5 (shadow maps), 6 (shadow matrices),
+	// 7 (caustic map) and 8 (caustic-apply uniform) for every workspace.
 	for (Workspace &workspace : workspaces) {
 		// Build image info array: real shadow maps first, then dummy for unused slots.
 		std::array< VkDescriptorImageInfo, MAX_SHADOW_CASTERS > shadow_image_infos;
@@ -920,7 +1183,25 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 			.range  = workspace.ShadowMatrices.size,
 		};
 
-		std::array< VkWriteDescriptorSet, 2 > writes{
+		VkDescriptorImageInfo caustic_image_info{
+			.sampler = caustic_sampler,
+			.imageView = workspace.caustic_map_array_view,
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		};
+
+		VkDescriptorBufferInfo caustic_apply_buf_info{
+			.buffer = workspace.CausticApply.handle,
+			.offset = 0,
+			.range  = workspace.CausticApply.size,
+		};
+
+		VkDescriptorImageInfo caustic_water_nrm_info{
+			.sampler = material_system.texture_sampler,
+			.imageView = caustic_water_nrm_view,
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		};
+
+		std::array< VkWriteDescriptorSet, 5 > writes{
 			VkWriteDescriptorSet{
 				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 				.dstSet = workspace.World_descriptors,
@@ -938,6 +1219,33 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				.descriptorCount = 1,
 				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 				.pBufferInfo = &shadow_matrices_buf_info,
+			},
+			VkWriteDescriptorSet{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = workspace.World_descriptors,
+				.dstBinding = 7,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &caustic_image_info,
+			},
+			VkWriteDescriptorSet{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = workspace.World_descriptors,
+				.dstBinding = 8,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.pBufferInfo = &caustic_apply_buf_info,
+			},
+			VkWriteDescriptorSet{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = workspace.CausticWater_descriptors,
+				.dstBinding = 1,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &caustic_water_nrm_info,
 			},
 		};
 		vkUpdateDescriptorSets(rtg.device, uint32_t(writes.size()), writes.data(), 0, nullptr);
@@ -1242,6 +1550,11 @@ Tutorial::~Tutorial() {
 		shadow_sampler = VK_NULL_HANDLE;
 	}
 
+	if (caustic_sampler != VK_NULL_HANDLE) {
+		vkDestroySampler(rtg.device, caustic_sampler, nullptr);
+		caustic_sampler = VK_NULL_HANDLE;
+	}
+
 	rtg.helpers.destroy_buffer(std::move(object_vertices));
 
 	if (swapchain_depth_image.handle != VK_NULL_HANDLE) {
@@ -1307,6 +1620,48 @@ Tutorial::~Tutorial() {
 		if (workspace.ShadowMatrices.handle != VK_NULL_HANDLE) {
 			rtg.helpers.destroy_buffer(std::move(workspace.ShadowMatrices));
 		}
+
+		if (workspace.CausticWater_src.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.CausticWater_src));
+		}
+		if (workspace.CausticWater.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.CausticWater));
+		}
+		//CausticWater_descriptors freed when pool is destroyed.
+
+		if (workspace.CausticApply_src.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.CausticApply_src));
+		}
+		if (workspace.CausticApply.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.CausticApply));
+		}
+
+		if (workspace.WaterSurface_src.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.WaterSurface_src));
+		}
+		if (workspace.WaterSurface.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.WaterSurface));
+		}
+
+		for (VkFramebuffer &fb : workspace.caustic_framebuffers) {
+			if (fb != VK_NULL_HANDLE) {
+				vkDestroyFramebuffer(rtg.device, fb, nullptr);
+				fb = VK_NULL_HANDLE;
+			}
+		}
+		for (VkImageView &lv : workspace.caustic_map_layer_views) {
+			if (lv != VK_NULL_HANDLE) {
+				vkDestroyImageView(rtg.device, lv, nullptr);
+				lv = VK_NULL_HANDLE;
+			}
+		}
+		if (workspace.caustic_map_array_view != VK_NULL_HANDLE) {
+			vkDestroyImageView(rtg.device, workspace.caustic_map_array_view, nullptr);
+			workspace.caustic_map_array_view = VK_NULL_HANDLE;
+		}
+		if (workspace.caustic_map.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_image(std::move(workspace.caustic_map));
+		}
 	}
 	workspaces.clear();
 
@@ -1320,6 +1675,7 @@ Tutorial::~Tutorial() {
 	lines_pipeline.destroy(rtg);
 	objects_pipeline.destroy(rtg);
 	shadow_pipeline.destroy(rtg);
+	caustic_pipeline.destroy(rtg);
 
 	if (command_pool != VK_NULL_HANDLE) {
 		vkDestroyCommandPool(rtg.device, command_pool, nullptr);
@@ -1334,6 +1690,11 @@ Tutorial::~Tutorial() {
 	if (shadow_render_pass != VK_NULL_HANDLE) {
 		vkDestroyRenderPass(rtg.device, shadow_render_pass, nullptr);
 		shadow_render_pass = VK_NULL_HANDLE;
+	}
+
+	if (caustic_render_pass != VK_NULL_HANDLE) {
+		vkDestroyRenderPass(rtg.device, caustic_render_pass, nullptr);
+		caustic_render_pass = VK_NULL_HANDLE;
 	}
 
 	if (timestamp_query_pool != VK_NULL_HANDLE) {
@@ -1883,6 +2244,178 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			1, &region);
 	}
 
+	// Shared pbr:water normal-map metadata (caustic.vert WATER_NM + objects.frag WAVE_COUNT.yzw).
+	constexpr float water_nm_uv_tile = 0.06f;
+	float water_nm_detail = 0.4f;
+	float water_use_nm = 0.f;
+	{
+		auto itmw = scene_viewer->s72.materials.find("pbr:water");
+		if (itmw != scene_viewer->s72.materials.end()
+		    && itmw->second.normal_map != nullptr) {
+			water_use_nm = 1.f;
+		}
+	}
+
+	{ // WaterSurface UBO (objects.frag binding 9)
+		if (workspace.WaterSurface_src.handle != VK_NULL_HANDLE) {
+			CausticPipeline::WaterSurfaceUniform ws{};
+			if (!scene_viewer->waters.empty()) {
+				SceneViewer::WaterInfo const& w = scene_viewer->waters[0];
+				glm::mat4 WFL = w.world_from_local;
+				ws.WORLD_FROM_LOCAL = WFL;
+				ws.LOCAL_FROM_WORLD = glm::inverse(WFL);
+				uint32_t wc = std::min<uint32_t>(uint32_t(w.waves.size()), 4u);
+				ws.SIZE_TIME_BLEND = glm::vec4(w.width, w.height, time, 0.0f);
+				ws.WAVE_COUNT = glm::vec4(float(wc), water_nm_uv_tile, water_nm_detail, water_use_nm);
+				for (uint32_t k = 0; k < wc; ++k) {
+					auto const& o = w.waves[k];
+					ws.WAVES[k] = glm::vec4(o.amplitude, o.frequency, o.direction, o.speed);
+				}
+				ws.ACTIVE = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+			} else {
+				ws.ACTIVE = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+			}
+			assert(workspace.WaterSurface_src.allocation.mapped);
+			std::memcpy(workspace.WaterSurface_src.allocation.data(), &ws, sizeof(ws));
+			VkBufferCopy region{
+				.srcOffset = 0, .dstOffset = 0,
+				.size = sizeof(CausticPipeline::WaterSurfaceUniform),
+			};
+			vkCmdCopyBuffer(workspace.command_buffer,
+				workspace.WaterSurface_src.handle,
+				workspace.WaterSurface.handle,
+				1, &region);
+		}
+	}
+
+	// Upload per-water caustic params (cap to MAX_WATER_SURFACES).
+	uint32_t caustic_water_count = std::min<uint32_t>(
+		uint32_t(scene_viewer->waters.size()), MAX_WATER_SURFACES);
+	if (caustic_water_count > 0) {
+		assert(workspace.CausticWater_src.allocation.mapped);
+		uint8_t *base = reinterpret_cast<uint8_t *>(workspace.CausticWater_src.allocation.data());
+
+		glm::vec3 sun_dir(
+			scene_viewer->world.SUN_DIRECTION.x,
+			scene_viewer->world.SUN_DIRECTION.y,
+			scene_viewer->world.SUN_DIRECTION.z
+		);
+		if (glm::length(sun_dir) < 1e-6f) sun_dir = glm::vec3(0.0f, 0.0f, 1.0f);
+		sun_dir = glm::normalize(sun_dir);
+
+		bool has_sun = false;
+		for (SceneViewer::LightInfo const& l : scene_viewer->lights) {
+			if (l.type == SceneViewer::LightInfo::Type::Sun) {
+				has_sun = true;
+				break;
+			}
+		}
+		glm::vec4 caustic_light_point(0.0f, 0.0f, 0.0f, 0.0f);
+		if (!has_sun) {
+			for (SceneViewer::LightInfo const& l : scene_viewer->lights) {
+				if (l.type == SceneViewer::LightInfo::Type::Sphere) {
+					caustic_light_point = glm::vec4(l.position, 1.0f);
+					break;
+				}
+			}
+		}
+
+		for (uint32_t i = 0; i < caustic_water_count; ++i) {
+			SceneViewer::WaterInfo const& w = scene_viewer->waters[i];
+
+			CausticPipeline::WaterParamsUniform u{};
+			u.WORLD_FROM_LOCAL = w.world_from_local;
+
+			u.SIZE_RES_RECV = glm::vec4(
+				w.width, w.height, float(w.resolution), w.receiver_z
+			);
+
+			// Caustic map footprint is centered on the water node's origin.
+			glm::vec3 center = glm::vec3(w.world_from_local * glm::vec4(0,0,0,1));
+			u.CAUSTIC_CEI = glm::vec4(
+				center.x, center.y, w.caustic_extent, w.caustic_intensity
+			);
+
+			u.SUN_TIME = glm::vec4(sun_dir, time);
+
+			uint32_t wc = std::min<uint32_t>(uint32_t(w.waves.size()), 4u);
+			u.WAVE_COUNT = glm::vec4(float(wc), 0.0f, 0.0f, 0.0f);
+			for (uint32_t k = 0; k < wc; ++k) {
+				auto const& o = w.waves[k];
+				u.WAVES[k] = glm::vec4(o.amplitude, o.frequency, o.direction, o.speed);
+			}
+
+			u.ROOM_MIN = glm::vec4(w.room_min, 0.0f);
+			u.ROOM_MAX = glm::vec4(w.room_max, 0.0f);
+			u.CAUSTIC_LIGHT_POINT = caustic_light_point;
+			u.WATER_NM = glm::vec4(water_nm_detail, water_nm_uv_tile, water_use_nm, 0.0f);
+
+			std::memcpy(base + size_t(i) * caustic_uniform_stride, &u, sizeof(u));
+		}
+
+		VkBufferCopy region{
+			.srcOffset = 0, .dstOffset = 0,
+			.size = VkDeviceSize(caustic_uniform_stride) * caustic_water_count,
+		};
+		vkCmdCopyBuffer(workspace.command_buffer,
+			workspace.CausticWater_src.handle,
+			workspace.CausticWater.handle,
+			1, &region);
+	}
+
+	// Upload CausticApply uniform for the main pass (room AABB + water Z).
+	{
+		ObjectsPipeline::CausticApplyUniform apply{};
+		glm::vec3 caustic_tint(
+			scene_viewer->world.SUN_ENERGY.r,
+			scene_viewer->world.SUN_ENERGY.g,
+			scene_viewer->world.SUN_ENERGY.b);
+		if (glm::length(caustic_tint) < 1e-5f) {
+			for (SceneViewer::LightInfo const& l : scene_viewer->lights) {
+				if (l.type == SceneViewer::LightInfo::Type::Sphere) {
+					caustic_tint = l.tint * 10000.0f;
+					break;
+				}
+			}
+		}
+		if (caustic_water_count > 0) {
+			SceneViewer::WaterInfo const& w = scene_viewer->waters[0];
+			glm::vec3 center = glm::vec3(w.world_from_local * glm::vec4(0, 0, 0, 1));
+			apply.CENTER_EXTENT_ACTIVE = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+			// z = world half-thickness of water slab (exclude horizontal water from
+			// receiving reflected caustics; x alone is node center z).
+			constexpr float water_slab_half_z = 0.056f;
+			apply.WATER_Z_RECEIVER_Z =
+				glm::vec4(center.z, w.receiver_z, water_slab_half_z, 0.0f);
+			apply.ROOM_MIN = glm::vec4(w.room_min, 0.0f);
+			apply.ROOM_MAX = glm::vec4(w.room_max, 0.0f);
+			// Match sphere caustic_tint brightness (fixed scale tuned for visible caustics).
+			constexpr float caustic_tint_scale = 10000.0f;
+			glm::vec3 tint_rgb = w.caustic_tint_set
+				? (w.caustic_tint * caustic_tint_scale)
+				: caustic_tint;
+			apply.CAUSTIC_TINT = glm::vec4(tint_rgb, 0.0f);
+		} else {
+			apply.CENTER_EXTENT_ACTIVE = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+			apply.WATER_Z_RECEIVER_Z   = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+			apply.ROOM_MIN = glm::vec4(0.0f);
+			apply.ROOM_MAX = glm::vec4(1.0f);
+			apply.CAUSTIC_TINT = glm::vec4(0.0f);
+		}
+
+		assert(workspace.CausticApply_src.allocation.mapped);
+		std::memcpy(workspace.CausticApply_src.allocation.data(), &apply, sizeof(apply));
+
+		VkBufferCopy region{
+			.srcOffset = 0, .dstOffset = 0,
+			.size = sizeof(ObjectsPipeline::CausticApplyUniform),
+		};
+		vkCmdCopyBuffer(workspace.command_buffer,
+			workspace.CausticApply_src.handle,
+			workspace.CausticApply.handle,
+			1, &region);
+	}
+
 	{ //memory barrier to make sure copies complete before rendering happens:
 		VkMemoryBarrier memory_barrier{
 			.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -1890,14 +2423,67 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
 		};
 
+		// Include VERTEX_SHADER_BIT so that caustic UBO reads in
+		// caustic.vert see the fresh copy, and FRAGMENT_SHADER_BIT so the
+		// CausticApply uniform is visible to objects.frag.
 		vkCmdPipelineBarrier( workspace.command_buffer, 
 			VK_PIPELINE_STAGE_TRANSFER_BIT, //srcStageMask
-			VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, //dstStageMask
+			VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, //dstStageMask
 			0, //dependencyFlags
 			1, &memory_barrier, //memoryBarriers (count, data)
 			0, nullptr, //bufferMemoryBarriers (count, data)
 			0, nullptr //imageMemoryBarriers (count, data)
 		);
+	}
+
+	// Caustic pass: six sub-passes (one per room face layer).  Each clears its
+	// layer and accumulates all water surfaces for that receiver plane.
+	{
+		VkClearValue clear_value{ .color{ .float32 = {0.0f, 0.0f, 0.0f, 0.0f} } };
+		VkViewport viewport{
+			.x = 0.0f, .y = 0.0f,
+			.width = float(CAUSTIC_MAP_SIZE), .height = float(CAUSTIC_MAP_SIZE),
+			.minDepth = 0.0f, .maxDepth = 1.0f,
+		};
+		VkRect2D scissor{ .offset = {0, 0}, .extent = {CAUSTIC_MAP_SIZE, CAUSTIC_MAP_SIZE} };
+
+		for (uint32_t face = 0; face < CAUSTIC_ROOM_FACE_COUNT; ++face) {
+			VkRenderPassBeginInfo caustic_begin{
+				.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+				.renderPass = caustic_render_pass,
+				.framebuffer = workspace.caustic_framebuffers[face],
+				.renderArea{ .offset = {0, 0}, .extent = {CAUSTIC_MAP_SIZE, CAUSTIC_MAP_SIZE} },
+				.clearValueCount = 1,
+				.pClearValues = &clear_value,
+			};
+			vkCmdBeginRenderPass(workspace.command_buffer, &caustic_begin, VK_SUBPASS_CONTENTS_INLINE);
+			vkCmdSetViewport(workspace.command_buffer, 0, 1, &viewport);
+			vkCmdSetScissor(workspace.command_buffer, 0, 1, &scissor);
+
+			if (caustic_water_count > 0) {
+				vkCmdBindPipeline(workspace.command_buffer,
+					VK_PIPELINE_BIND_POINT_GRAPHICS, caustic_pipeline.handle);
+
+				uint32_t face_idx = face;
+				vkCmdPushConstants(workspace.command_buffer, caustic_pipeline.layout,
+					VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uint32_t), &face_idx);
+
+				for (uint32_t i = 0; i < caustic_water_count; ++i) {
+					uint32_t dyn_offset = i * caustic_uniform_stride;
+					vkCmdBindDescriptorSets(workspace.command_buffer,
+						VK_PIPELINE_BIND_POINT_GRAPHICS, caustic_pipeline.layout,
+						0, 1, &workspace.CausticWater_descriptors,
+						1, &dyn_offset);
+
+					uint32_t R = std::max<uint32_t>(scene_viewer->waters[i].resolution, 2u);
+					uint32_t Q = R - 1u;
+					uint32_t vert_count = 6u * Q * Q;
+					vkCmdDraw(workspace.command_buffer, vert_count, 1, 0, 0);
+				}
+			}
+
+			vkCmdEndRenderPass(workspace.command_buffer);
+		}
 	}
 
 	// Shadow passes: render scene depth from each shadow-casting light's perspective
@@ -2404,23 +2990,9 @@ void Tutorial::update(float dt) {
 		// }
 	}
 
-	{ //default sun and sky (only used if scene has no corresponding lights):
-		scene_viewer->world.SKY_DIRECTION.x = 0.0f;
-		scene_viewer->world.SKY_DIRECTION.y = 0.0f;
-		scene_viewer->world.SKY_DIRECTION.z = 1.0f;
-
-		scene_viewer->world.SKY_ENERGY.r = 0.0f;
-		scene_viewer->world.SKY_ENERGY.g = 0.0f;
-		scene_viewer->world.SKY_ENERGY.b = 0.0f;
-
-		scene_viewer->world.SUN_DIRECTION.x = 0.0f;
-		scene_viewer->world.SUN_DIRECTION.y = 0.0f;
-		scene_viewer->world.SUN_DIRECTION.z = 1.0f;
-
-		scene_viewer->world.SUN_ENERGY.r = 0.0f;
-		scene_viewer->world.SUN_ENERGY.g = 0.0f;
-		scene_viewer->world.SUN_ENERGY.b = 0.0f;
-	}
+	// Sun/sky on scene_viewer->world come from SceneViewer::traverse_node at
+	// build_scene_objects(); do not reset them here each frame (that zeroed
+	// SUN_ENERGY and broke caustics + any code using World sun parameters).
 
 	scene_viewer->world.EYE.x = eye.x;
 	scene_viewer->world.EYE.y = eye.y;
