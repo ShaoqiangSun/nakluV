@@ -86,6 +86,11 @@ struct RTG {
 		std::string csv_file = "";
 		std::string exposure_stops = "";
 		std::string tone_mapping_mode = "";
+		// If true, the shadow-map render passes run only on frame 0; subsequent
+		// frames reuse the previously rendered (frozen) shadow maps. Used to
+		// isolate the per-frame shadow-map rendering cost from the main-pass
+		// shadow-map sampling cost. See the A3-shadows section of report.html.
+		bool freeze_shadows = false;
 
 		//for configuration construction + management:
 		Configuration() = default;

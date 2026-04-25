@@ -1,0 +1,262 @@
+[
+"s72-v2",
+{
+	"type": "MATERIAL",
+	"name": "lambertian:checker",
+	"lambertian": {
+		"albedo": {
+			"src": "checker.png",
+			"format": "srgb"
+		}
+	}
+},
+{
+	"type": "MESH",
+	"name": "Floor",
+	"topology": "TRIANGLE_LIST",
+	"count": 6,
+	"attributes": {
+		"POSITION": {
+			"src": "perf-test-floor.b72",
+			"offset": 0,
+			"stride": 48,
+			"format": "R32G32B32_SFLOAT"
+		},
+		"NORMAL": {
+			"src": "perf-test-floor.b72",
+			"offset": 12,
+			"stride": 48,
+			"format": "R32G32B32_SFLOAT"
+		},
+		"TANGENT": {
+			"src": "perf-test-floor.b72",
+			"offset": 24,
+			"stride": 48,
+			"format": "R32G32B32A32_SFLOAT"
+		},
+		"TEXCOORD": {
+			"src": "perf-test-floor.b72",
+			"offset": 40,
+			"stride": 48,
+			"format": "R32G32_SFLOAT"
+		}
+	},
+	"material": "lambertian:checker"
+},
+{
+	"type": "NODE",
+	"name": "Floor",
+	"translation": [
+		0.0,
+		0.0,
+		0.0
+	],
+	"rotation": [
+		0.0,
+		0.0,
+		0.0,
+		1.0
+	],
+	"scale": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"mesh": "Floor"
+},
+{
+	"type": "LIGHT",
+	"name": "SpotLight0",
+	"tint": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"spot": {
+		"radius": 0.0,
+		"power": 500.0,
+		"fov": 0.927293,
+		"blend": 0.5,
+		"limit": 80.0
+	},
+	"shadow": 256
+},
+{
+	"type": "NODE",
+	"name": "SpotNode0",
+	"translation": [
+		20.0,
+		20.0,
+		8.0
+	],
+	"rotation": [
+		0.0,
+		-0.382683,
+		0.0,
+		0.92388
+	],
+	"scale": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"light": "SpotLight0"
+},
+{
+	"type": "LIGHT",
+	"name": "SpotLight1",
+	"tint": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"spot": {
+		"radius": 0.0,
+		"power": 500.0,
+		"fov": 0.927293,
+		"blend": 0.5,
+		"limit": 80.0
+	},
+	"shadow": 256
+},
+{
+	"type": "NODE",
+	"name": "SpotNode1",
+	"translation": [
+		-20.0,
+		20.0,
+		8.0
+	],
+	"rotation": [
+		0.0,
+		-0.382683,
+		0.0,
+		0.92388
+	],
+	"scale": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"light": "SpotLight1"
+},
+{
+	"type": "LIGHT",
+	"name": "SpotLight2",
+	"tint": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"spot": {
+		"radius": 0.0,
+		"power": 500.0,
+		"fov": 0.927293,
+		"blend": 0.5,
+		"limit": 80.0
+	},
+	"shadow": 256
+},
+{
+	"type": "NODE",
+	"name": "SpotNode2",
+	"translation": [
+		20.0,
+		-20.0,
+		8.0
+	],
+	"rotation": [
+		0.0,
+		-0.382683,
+		0.0,
+		0.92388
+	],
+	"scale": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"light": "SpotLight2"
+},
+{
+	"type": "LIGHT",
+	"name": "SpotLight3",
+	"tint": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"spot": {
+		"radius": 0.0,
+		"power": 500.0,
+		"fov": 0.927293,
+		"blend": 0.5,
+		"limit": 80.0
+	},
+	"shadow": 256
+},
+{
+	"type": "NODE",
+	"name": "SpotNode3",
+	"translation": [
+		-20.0,
+		-20.0,
+		8.0
+	],
+	"rotation": [
+		0.0,
+		-0.382683,
+		0.0,
+		0.92388
+	],
+	"scale": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"light": "SpotLight3"
+},
+{
+	"type": "CAMERA",
+	"name": "PerfCam",
+	"perspective": {
+		"aspect": 1.0,
+		"vfov": 1.0472,
+		"near": 1.0,
+		"far": 1000.0
+	}
+},
+{
+	"type": "NODE",
+	"name": "Camera",
+	"translation": [
+		0.0,
+		0.0,
+		50.0
+	],
+	"rotation": [
+		0.0,
+		0.0,
+		0.0,
+		1.0
+	],
+	"scale": [
+		1.0,
+		1.0,
+		1.0
+	],
+	"camera": "PerfCam"
+},
+{
+	"type": "SCENE",
+	"name": "perf-shadows-256",
+	"roots": [
+		"Floor",
+		"SpotNode0",
+		"SpotNode1",
+		"SpotNode2",
+		"SpotNode3",
+		"Camera"
+	]
+}
+]

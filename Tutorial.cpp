@@ -114,7 +114,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 				throw std::runtime_error("Failed to open perf.csv");
 			}
 
-			perf_log << "frame,instances,visible,cpu_cull_ms,cpu_frame_ms,cpu_wait_gpu_ms,gpu_draw_ms\n";
+			perf_log << "frame,instances,visible,cpu_cull_ms,cpu_frame_ms,cpu_wait_gpu_ms,gpu_draw_ms,gpu_shadow_ms\n";
 		}
 		else if (!rtg.configuration.scene_file.empty()) {
 			scene_viewer->s72 = S72::load(rtg.configuration.scene_file);
@@ -416,10 +416,16 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_), material_system(rtg_) {
 		if (align == 0) align = 1;
 		caustic_uniform_stride = ((raw_size + align - 1) / align) * align;
 
+		// 4 queries per frame:
+		//   [0]: top-of-pipe before shadow-map render passes
+		//   [1]: bottom-of-pipe after shadow-map render passes (+ barrier)
+		//   [2]: top-of-pipe before the main color render pass
+		//   [3]: bottom-of-pipe after the main color render pass
+		// shadow_ms = (t[1]-t[0]) * period,   gpu_draw_ms = (t[3]-t[2]) * period
 		VkQueryPoolCreateInfo qpci{
 			.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
 			.queryType = VK_QUERY_TYPE_TIMESTAMP,
-			.queryCount = 2,
+			.queryCount = 4,
 		};
 		VK( vkCreateQueryPool(rtg.device, &qpci, nullptr, &timestamp_query_pool) );
 	}
@@ -2486,11 +2492,33 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 		}
 	}
 
+	// Reset the 4-query timestamp pool and stamp the top-of-pipe marker just
+	// before the shadow render passes. The per-pass pair (t[0], t[1]) isolates
+	// shadow-map rendering cost; the later pair (t[2], t[3]) isolates the
+	// main color pass (see query pool setup above).
+	vkCmdResetQueryPool(workspace.command_buffer, timestamp_query_pool, 0, 4);
+	vkCmdWriteTimestamp(
+		workspace.command_buffer,
+		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		timestamp_query_pool,
+		0
+	);
+
 	// Shadow passes: render scene depth from each shadow-casting light's perspective
 	if (!shadow_lights.empty()
 	    && !scene_viewer->object_instances.empty()
 	    && workspace.AllWorldTransforms.handle != VK_NULL_HANDLE) {
 
+		// With `--freeze-shadows`, only re-render shadow maps for the first
+		// `workspaces.size()` frames (one per in-flight command buffer), then
+		// reuse the frozen maps for the rest of the run. This isolates the
+		// per-frame shadow-map sampling cost from the shadow-map rendering
+		// cost when comparing perf runs.
+		bool const run_shadow_render =
+			!rtg.configuration.freeze_shadows
+			|| frame_id < workspaces.size();
+
+	  if (run_shadow_render) {
 		// Pre-compute CLIP_FROM_WORLD for each shadow light (reusing same logic as above).
 		std::vector< mat4 > shadow_clip_from_world(shadow_lights.size());
 		for (uint32_t slot = 0; slot < uint32_t(shadow_lights.size()); ++slot) {
@@ -2601,7 +2629,17 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 				0, nullptr,
 				uint32_t(barriers.size()), barriers.data());
 		}
+	  } // end if (run_shadow_render)
 	}
+
+	// End of the shadow-pass timed region. All shadow-map writes (if any) are
+	// complete here; `shadow_ms = (t[1]-t[0]) * period`.
+	vkCmdWriteTimestamp(
+		workspace.command_buffer,
+		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+		timestamp_query_pool,
+		1
+	);
 
 	//TODO: put GPU commands here!
 	{ //render pass
@@ -2622,14 +2660,13 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			.pClearValues = clear_values.data(),
 		};
 
-		//
-		vkCmdResetQueryPool(workspace.command_buffer, timestamp_query_pool, 0, 2);
-
+		// Main color pass top-of-pipe timestamp (shadow passes & caustic pass
+		// are already finished above; main-pass cost = t[3]-t[2]).
 		vkCmdWriteTimestamp(
 			workspace.command_buffer,
 			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
 			timestamp_query_pool,
-			0
+			2
 		);
 
 		vkCmdBeginRenderPass(workspace.command_buffer, &begin_info, VK_SUBPASS_CONTENTS_INLINE);
@@ -2813,7 +2850,7 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			workspace.command_buffer,
 			VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
 			timestamp_query_pool,
-			1
+			3
 		);
 	}
 
@@ -2853,19 +2890,23 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 	CPUTimer cpu_wait_timer;
 	cpu_wait_timer.start();
 
-	uint64_t timestamps[2] = {};
+	uint64_t timestamps[4] = {};
 
 	VK(vkGetQueryPoolResults(
 		rtg.device,
 		timestamp_query_pool,
-		0, 2,
+		0, 4,
 		sizeof(timestamps),
 		timestamps,
 		sizeof(uint64_t),
 		VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
 	));
 
-	double gpu_ms = double(timestamps[1] - timestamps[0]) * timestamp_period * 1e-6;
+	// t[0..1] brackets shadow-map rendering; t[2..3] brackets the main color
+	// pass (which is where PCF shadow sampling occurs). Legacy gpu_ms keeps
+	// the same meaning it had before (main-pass-only) for chart continuity.
+	double gpu_shadow_ms = double(timestamps[1] - timestamps[0]) * timestamp_period * 1e-6;
+	double gpu_ms        = double(timestamps[3] - timestamps[2]) * timestamp_period * 1e-6;
 
 	cpu_wait_gpu_ms = cpu_wait_timer.ms();
 
@@ -2880,16 +2921,21 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 
 	if (perf_log.is_open()) {
 		perf_log
-		<< frame_id++ << ","
+		<< frame_id << ","
 		<< scene_viewer->object_instances.size() << ","
 		<< draw_list.size() << ","
 		<< cpu_cull_ms << ","
 		<< cpu_frame_ms << ","
 		<< cpu_wait_gpu_ms << ","
-		<< gpu_ms
+		<< gpu_ms << ","
+		<< gpu_shadow_ms
 		<< "\n";
 	}
 
+	// Always advance the frame counter so `--freeze-shadows` can correctly
+	// detect when every in-flight workspace has had its shadow maps
+	// initialized, even when no perf log is open.
+	++frame_id;
 }
 
 

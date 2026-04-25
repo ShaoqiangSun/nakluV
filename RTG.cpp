@@ -79,6 +79,8 @@ void RTG::Configuration::parse(int argc, char **argv) {
 			if (argi + 1 >= argc) throw std::runtime_error("--tone-map requires a parameter (linear|reinhard).");
 			argi += 1;
 			tone_mapping_mode = argv[argi];
+		} else if (arg == "--freeze-shadows") {
+			freeze_shadows = true;
 		}
 		
 		else {
